@@ -86,25 +86,34 @@ pub struct App {
     /// modifier. It also works with a mouse.
     pub flag_mode: bool,
     pub chan: Option<RtcDataChannel>,
-    /// Wall-clock milliseconds at the first reveal and at game over. The clock
-    /// only starts when the board does, and freezes when it ends.
-    start_ms: Option<f64>,
-    end_ms: Option<f64>,
     ctx: Ctx,
     canvas: web_sys::HtmlCanvasElement,
 }
 
-/// Whether the current board has been opened yet. Only events after the last
-/// `Start` count: a restart leaves the old moves in the log, and they must not
-/// keep the clock running on a board nobody has touched.
-pub fn opened_since_restart(log: &[Stamped]) -> bool {
+/// When the clock started and, if the game is over, when it stopped — both
+/// read out of the log, so every peer shows the same numbers no matter when
+/// they joined.
+///
+/// It starts at the first reveal of the current board, which is when the game
+/// really begins: mines are not placed until then. Only events after the last
+/// `Start` count, because a restart leaves the old moves in the log.
+///
+/// `over` comes from the engine rather than the log, so the stop time is the
+/// last event we folded — the move that won or lost it.
+pub fn clock_window(log: &[Stamped], over: bool) -> (Option<u64>, Option<u64>) {
     let from = log
         .iter()
         .rposition(|s| matches!(s.ev, Event::Start { .. }))
         .map_or(0, |i| i + 1);
-    log[from..]
+    let started = log[from..]
         .iter()
-        .any(|s| matches!(s.ev, Event::Reveal { .. }))
+        .find(|s| matches!(s.ev, Event::Reveal { .. }))
+        .map(|s| s.at_ms);
+    let stopped = match (over, started) {
+        (true, Some(_)) => log.last().map(|s| s.at_ms),
+        _ => None,
+    };
+    (started, stopped)
 }
 
 /// Flags outstanding: the classic counter, which counts flags rather than
@@ -127,13 +136,12 @@ impl App {
             log: vec![Stamped {
                 seq: 0,
                 ev: Event::Start { seed, w, h, mines },
+                at_ms: js_sys::Date::now() as u64,
             }],
             clock: 0,
             player: 0,
             flag_mode: false,
             chan: None,
-            start_ms: None,
-            end_ms: None,
             ctx,
             canvas,
         }
@@ -163,32 +171,26 @@ impl App {
         }
     }
 
-    /// Everything that has to happen after the board changes: run the clock,
-    /// repaint, update the two numbers above the board.
+    /// Everything that has to happen after the board changes: repaint, and
+    /// update the two numbers above the board.
     fn refresh(&mut self) {
-        let playing = self.game.status() == Status::Playing;
-        let opened = opened_since_restart(&self.log);
-        if !opened {
-            // A fresh board, from New game or from adopting the host's log.
-            self.start_ms = None;
-        } else if self.start_ms.is_none() {
-            self.start_ms = Some(js_sys::Date::now());
-        }
-        self.end_ms = match (playing, self.end_ms) {
-            (true, _) => None,
-            (false, None) => Some(js_sys::Date::now()),
-            (false, e) => e,
-        };
         self.draw();
         self.hud();
     }
 
     /// Seconds on the clock: live while playing, frozen once it is over.
+    ///
+    /// While the game runs this is our own clock minus the author's, so two
+    /// devices whose clocks disagree will disagree by that much. The final
+    /// time is subtracted entirely out of the log, so it is the same number
+    /// on both screens — and that is the one worth being right.
     fn seconds(&self) -> u32 {
-        let Some(start) = self.start_ms else {
+        let over = self.game.status() != Status::Playing;
+        let (Some(start), stop) = clock_window(&self.log, over) else {
             return 0;
         };
-        ((self.end_ms.unwrap_or_else(js_sys::Date::now) - start) / 1000.0).max(0.0) as u32
+        let now = stop.unwrap_or_else(|| js_sys::Date::now() as u64);
+        (now.saturating_sub(start) / 1000) as u32
     }
 
     fn hud(&self) {
@@ -223,7 +225,11 @@ impl App {
 pub fn local(app: &Shared, ev: Event) {
     let mut a = app.borrow_mut();
     a.clock += 1;
-    let s = Stamped { seq: a.clock, ev };
+    let s = Stamped {
+        seq: a.clock,
+        ev,
+        at_ms: js_sys::Date::now() as u64,
+    };
     // Our clock is at least as high as anything we have heard, so this sorts
     // last and the append is already in order.
     a.log.push(s);
@@ -420,8 +426,14 @@ mod tests {
         assert_eq!(mines_left(&g.board), -1);
     }
 
+    /// `at_ms` follows `seq` unless a test cares about the clock, in which
+    /// case it uses `at`.
     fn stamp(seq: u32, ev: Event) -> Stamped {
-        Stamped { seq, ev }
+        at(seq, ev, seq as u64)
+    }
+
+    fn at(seq: u32, ev: Event, at_ms: u64) -> Stamped {
+        Stamped { seq, ev, at_ms }
     }
 
     fn start(seed: u64) -> Stamped {
@@ -534,35 +546,58 @@ mod tests {
         assert!(ours.windows(2).all(|w| w[0] < w[1]));
     }
 
-    /// The clock runs for the board in front of you, not for the log.
+    /// The clock runs for the board in front of you, not for the log — and it
+    /// is read out of the log, so a peer who joins late reads the same start.
     #[test]
-    fn a_restart_puts_the_clock_back_to_stopped() {
-        let reveal = stamp(
+    fn the_clock_is_read_from_the_log() {
+        let reveal = at(
             1,
             Event::Reveal {
                 player: 0,
                 x: 1,
                 y: 1,
             },
+            10_000,
         );
-        assert!(!opened_since_restart(&[start(1)]));
-        assert!(opened_since_restart(&[start(1), reveal]));
+        let flag = at(
+            2,
+            Event::Flag {
+                player: 1,
+                x: 5,
+                y: 5,
+            },
+            42_000,
+        );
+
+        // Nothing opened yet: stopped, and no start to count from.
+        assert_eq!(clock_window(&[start(1)], false), (None, None));
+        // Running: it began at the first reveal and has no end.
+        assert_eq!(
+            clock_window(&[start(1), reveal, flag], false),
+            (Some(10_000), None)
+        );
+        // Over: the end is the move that ended it — 32 seconds of game.
+        assert_eq!(
+            clock_window(&[start(1), reveal, flag], true),
+            (Some(10_000), Some(42_000))
+        );
         // New game: the old reveal is still in the log and must not count.
-        assert!(!opened_since_restart(&[start(1), reveal, start(2)]));
-        assert!(opened_since_restart(&[
-            start(1),
-            reveal,
-            start(2),
-            stamp(
-                3,
-                Event::Reveal {
-                    player: 1,
-                    x: 2,
-                    y: 2
-                }
-            )
-        ]));
+        assert_eq!(
+            clock_window(&[start(1), reveal, at(3, START2.ev, 99_000)], false),
+            (None, None)
+        );
     }
+
+    const START2: Stamped = Stamped {
+        seq: 3,
+        ev: Event::Start {
+            seed: 2,
+            w: 9,
+            h: 9,
+            mines: 10,
+        },
+        at_ms: 0,
+    };
 
     #[test]
     fn merge_ignores_events_it_already_has() {

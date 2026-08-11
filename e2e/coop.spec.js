@@ -147,6 +147,12 @@ test('a fresh joiner adopts the host board, mid-game', async ({ browser }) => {
   await expect.poll(() => logLen(c)).toBe(3);
   expect(await hash(c)).toBe(await hash(a));
 
+  // The clock came out of the log, so the newcomer is not starting from zero:
+  // it reads the same elapsed time as the player who has been here all along.
+  const secs = async (p) => Number((await p.locator('#hud').textContent()).match(/(\d+)s/)[1]);
+  await expect.poll(async () => Math.abs((await secs(a)) - (await secs(c)))).toBeLessThanOrEqual(1);
+  expect(await secs(c)).toBeGreaterThan(0);
+
   await a.close();
   await c.close();
 });

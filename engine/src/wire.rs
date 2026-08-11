@@ -14,10 +14,11 @@
 //! ```
 //!
 //! A log is a sequence of *stamped* events — each of the above prefixed with
-//! `seq(4)`, the Lamport clock that puts the two peers' moves in one agreed
-//! order. That prefix is version 2 of this format; a version 1 peer reading
-//! it would see a seq where it expects a tag and reject the message, which is
-//! the right failure.
+//! `seq(4) at_ms(8)`: the Lamport clock that puts the two peers' moves in one
+//! agreed order, and the author's wall clock so the game clock can be read
+//! out of the log. That prefix is version 3 of this format; an older peer
+//! reading it sees a seq where it expects a tag and rejects the message,
+//! which is the right failure.
 //!
 //! Every decode path is a trust boundary — the bytes arrive from a peer, and
 //! a peer can be buggy, outdated, or hostile. Nothing here panics or indexes
@@ -31,8 +32,10 @@ const TAG_FLAG: u8 = 2;
 
 const START_LEN: usize = 13;
 const MOVE_LEN: usize = 4;
-/// The `seq` prefix on every record in a log.
+/// The `seq` + `at_ms` prefix on every record in a log.
 const SEQ_LEN: usize = 4;
+const AT_LEN: usize = 8;
+const STAMP_LEN: usize = SEQ_LEN + AT_LEN;
 
 impl Event {
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -82,13 +85,15 @@ impl Event {
 impl Stamped {
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(&self.at_ms.to_le_bytes());
         self.ev.encode(out);
     }
 
     pub fn decode(bytes: &[u8]) -> Option<(Stamped, usize)> {
         let seq = u32::from_le_bytes(bytes.get(..SEQ_LEN)?.try_into().ok()?);
-        let (ev, n) = Event::decode(&bytes[SEQ_LEN..])?;
-        Some((Stamped { seq, ev }, SEQ_LEN + n))
+        let at_ms = u64::from_le_bytes(bytes.get(SEQ_LEN..STAMP_LEN)?.try_into().ok()?);
+        let (ev, n) = Event::decode(&bytes[STAMP_LEN..])?;
+        Some((Stamped { seq, ev, at_ms }, STAMP_LEN + n))
     }
 }
 
@@ -143,7 +148,7 @@ pub fn decode_msg(bytes: &[u8]) -> Option<Msg> {
 }
 
 pub fn encode_log(events: &[Stamped]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(events.len() * (SEQ_LEN + MOVE_LEN));
+    let mut out = Vec::with_capacity(events.len() * (STAMP_LEN + MOVE_LEN));
     for ev in events {
         ev.encode(&mut out);
     }
@@ -170,7 +175,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn stamp(seq: u32, ev: Event) -> Stamped {
-        Stamped { seq, ev }
+        Stamped { seq, ev, at_ms: 0 }
     }
 
     /// If this test fails, you changed the wire format. That is allowed, but
@@ -239,7 +244,7 @@ mod tests {
 
     #[test]
     fn a_log_ending_mid_frame_is_rejected() {
-        let start = SEQ_LEN + START_LEN;
+        let start = STAMP_LEN + START_LEN;
         let full = encode_log(&[
             stamp(
                 0,
@@ -259,7 +264,7 @@ mod tests {
                 },
             ),
         ]);
-        assert_eq!(full.len(), start + SEQ_LEN + MOVE_LEN);
+        assert_eq!(full.len(), start + STAMP_LEN + MOVE_LEN);
         // Cutting inside the second event: the first still decodes, the log
         // as a whole must not.
         for cut in start + 1..full.len() {
@@ -273,20 +278,25 @@ mod tests {
         assert_eq!(decode_log(&full).map(|v| v.len()), Some(2));
     }
 
-    /// The stamp is what the peers sort by, so its bytes are frozen too.
+    /// The stamp is what the peers sort by and what the clock is read from,
+    /// so its bytes are frozen too: seq, then at_ms, then the event.
     #[test]
     fn stamp_layout_is_frozen() {
         let mut v = Vec::new();
-        stamp(
-            0x0A0B_0C0D,
-            Event::Reveal {
+        Stamped {
+            seq: 0x0A0B_0C0D,
+            at_ms: 0x0102_0304_0506_0708,
+            ev: Event::Reveal {
                 player: 1,
                 x: 2,
                 y: 3,
             },
-        )
+        }
         .encode(&mut v);
-        assert_eq!(v, [0x0D, 0x0C, 0x0B, 0x0A, 1, 1, 2, 3]);
+        assert_eq!(
+            v,
+            [0x0D, 0x0C, 0x0B, 0x0A, 8, 7, 6, 5, 4, 3, 2, 1, 1, 1, 2, 3]
+        );
     }
 
     #[test]
@@ -393,7 +403,11 @@ mod tests {
     }
 
     fn any_stamped() -> impl Strategy<Value = Stamped> {
-        (any::<u32>(), any_event()).prop_map(|(seq, ev)| Stamped { seq, ev })
+        (any::<u32>(), any_event(), any::<u64>()).prop_map(|(seq, ev, at_ms)| Stamped {
+            seq,
+            ev,
+            at_ms,
+        })
     }
 
     fn any_event() -> impl Strategy<Value = Event> {

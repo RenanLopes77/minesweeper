@@ -29,10 +29,13 @@ The event log is the source of truth; board state is derived by folding
 identical boards without exchanging them. `Game::hash()` reduces the whole
 board to a `u64` for divergence detection.
 
-Each event travels `Stamped` with a Lamport `seq`. Both peers keep the log
-sorted by `(seq, event)` and refold the board from it, so the two of them agree
-on one order no matter who heard what first — the hash is now a check on that
-agreement rather than the only thing standing between you and a silent split.
+Each event travels `Stamped` with a Lamport `seq` and the author's `at_ms`.
+Both peers keep the log sorted by `(seq, event)` and refold the board from it,
+so the two of them agree on one order no matter who heard what first — the hash
+is now a check on that agreement rather than the only thing standing between
+you and a silent split. `at_ms` never affects the order; it is what lets the
+game clock be read out of the log, so a peer who joins halfway through shows
+the same elapsed time as everyone else instead of starting from zero.
 
 ## Develop
 
@@ -138,8 +141,10 @@ consent checks time out — up to about half a minute. The status line says the
 other player has gone quiet as soon as the state wobbles, rather than leaving
 a board that has silently stopped moving.
 
-**The clock is per-device.** It starts at your first reveal, so someone who
-joins a game in progress sees their own elapsed time, not the host's. Nothing
-in the log records when the game began.
+**The running clock is only as good as the two devices' clocks.** It counts
+from the timestamp on the first reveal, which was written by whoever made that
+move, so peers whose system clocks disagree will disagree by that much while
+the game is live. The *final* time is subtracted entirely out of the log —
+last event minus first reveal — so it is identical on both screens.
 
 **`wasm-opt` is disabled** — see the comment in `.github/workflows/ci.yml`.
