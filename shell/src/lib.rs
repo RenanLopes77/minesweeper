@@ -1,4 +1,5 @@
 mod app;
+mod b64;
 mod net;
 mod sig;
 

@@ -43,4 +43,6 @@ features = [
   "RtcPeerConnectionState",
   "RtcIceConnectionState",
   "RtcDataChannelType",
+  "Navigator",
+  "Clipboard",
 ]
