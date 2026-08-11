@@ -14,9 +14,11 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{Document, HtmlTextAreaElement, RtcDataChannel, RtcPeerConnection};
+use web_sys::{
+    Document, HtmlTextAreaElement, RtcDataChannel, RtcDataChannelType, RtcPeerConnection,
+};
 
-use crate::net;
+use crate::{app, net};
 
 /// Who we are in the handshake. Decides what the Accept button does with
 /// whatever is in the textarea.
@@ -28,30 +30,20 @@ enum Role {
     Host,
 }
 
-/// Kept alive for the life of the page: dropping the RtcPeerConnection closes
-/// the connection, and dropping the channel loses the messages.
-///
-/// `chan` is unread until ch13 gives it something to carry. It exists now so
-/// the connection has an owner — without one, a successful handshake would be
-/// torn down the instant `wire` returns.
-pub struct Link {
-    #[allow(dead_code)]
-    pub chan: Rc<RefCell<Option<RtcDataChannel>>>,
-}
-
-pub fn wire(doc: &Document) -> Result<Link, JsValue> {
+pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     let ta: HtmlTextAreaElement = doc.get_element_by_id("sig").ok_or("no #sig")?.dyn_into()?;
     let host_btn = doc.get_element_by_id("host").ok_or("no #host")?;
     let accept_btn = doc.get_element_by_id("accept").ok_or("no #accept")?;
 
+    // The connection needs an owner that outlives this function; the App now
+    // holds the channel, and this holds the peer connection.
     let pc: Rc<RefCell<Option<RtcPeerConnection>>> = Rc::new(RefCell::new(None));
-    let chan: Rc<RefCell<Option<RtcDataChannel>>> = Rc::new(RefCell::new(None));
     let role = Rc::new(Cell::new(Role::Idle));
 
     {
-        let (pc, chan, ta, role) = (pc.clone(), chan.clone(), ta.clone(), role.clone());
+        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let (pc, chan, ta, role) = (pc.clone(), chan.clone(), ta.clone(), role.clone());
+            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
             spawn_local(async move {
                 net::note("gathering candidates…");
                 let conn = match net::new_connection() {
@@ -61,7 +53,7 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
                 net::trace_states(&conn, "host");
                 match net::make_offer(&conn).await {
                     Ok((ch, sdp)) => {
-                        watch(ch, chan, "host");
+                        watch(ch, app, "host");
                         ta.set_value(&sdp);
                         ta.select();
                         *pc.borrow_mut() = Some(conn);
@@ -84,9 +76,9 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
     }
 
     {
-        let (pc, chan, ta, role) = (pc.clone(), chan.clone(), ta.clone(), role.clone());
+        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let (pc, chan, ta, role) = (pc.clone(), chan.clone(), ta.clone(), role.clone());
+            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
             spawn_local(async move {
                 // Not trimmed here — net::normalize_sdp owns that, and doing it
                 // in two places is how the terminator got eaten the first time.
@@ -122,13 +114,13 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
                         // can arrive the moment the connection completes.
                         let incoming = net::on_data_channel(&conn);
                         {
-                            let chan = chan.clone();
+                            let app = app.clone();
                             spawn_local(async move {
                                 net::log("[join] waiting for ondatachannel");
                                 if let Ok(Ok(ch)) =
                                     incoming.await.map(|v| v.dyn_into::<RtcDataChannel>())
                                 {
-                                    watch(ch, chan, "join");
+                                    watch(ch, app, "join");
                                 }
                             });
                         }
@@ -156,18 +148,37 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
         cb.forget();
     }
 
-    Ok(Link { chan })
+    Ok(())
 }
 
 /// Stores the channel and reports when it opens. Both sides end up here — the
 /// host from `create_data_channel`, the joiner from `ondatachannel`.
-fn watch(ch: RtcDataChannel, slot: Rc<RefCell<Option<RtcDataChannel>>>, tag: &'static str) {
+fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str) {
     net::log(&format!("[{tag}] channel {:?}", ch.ready_state()));
+
+    // Default binaryType is "blob", which would hand us a Blob needing an
+    // async read. Arraybuffer is synchronous and is what we encode to.
+    ch.set_binary_type(RtcDataChannelType::Arraybuffer);
+
+    {
+        let app = app.clone();
+        let on_msg =
+            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
+                let bytes = js_sys::Uint8Array::new(&e.data()).to_vec();
+                app::remote(&app, &bytes);
+            });
+        ch.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
+        on_msg.forget();
+    }
+
     let opened = net::on_open(&ch);
-    *slot.borrow_mut() = Some(ch);
+    app.borrow_mut().chan = Some(ch);
     spawn_local(async move {
         match opened.await {
-            Ok(_) => net::note(&format!("CONNECTED ({tag})")),
+            Ok(_) => {
+                net::note(&format!("CONNECTED ({tag})"));
+                app::on_connect(&app, tag == "host");
+            }
             Err(e) => net::note(&format!("[{tag}] channel failed: {e:?}")),
         }
     });

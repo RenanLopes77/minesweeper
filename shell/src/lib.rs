@@ -1,23 +1,15 @@
+mod app;
 mod net;
 mod sig;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use engine::{Event, Game, Reveal, Status};
+use app::{App, CELL, H, MINES, W};
+use engine::{Event, Status};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d as Ctx;
-
-const CELL: f64 = 32.0;
-const W: u8 = 9;
-const H: u8 = 9;
-const MINES: u16 = 10;
-
-/// Classic Minesweeper digit colours. Index 0 is unused.
-const DIGITS: [&str; 9] = [
-    "", "#2b52c8", "#2e7d32", "#c0392b", "#1f3070", "#8c3b2e", "#17727a", "#2b3038", "#6d7684",
-];
 
 #[wasm_bindgen(start)]
 pub fn main() -> Result<(), JsValue> {
@@ -26,26 +18,18 @@ pub fn main() -> Result<(), JsValue> {
 
     // ?selftest runs the WebRTC loopback instead of the game. Not a unit test
     // — running it needs a real browser, and a real browser is the thing under
-    // test. Result goes in #status so it can be scraped headlessly.
+    // test.
     if win
         .location()
         .search()
         .unwrap_or_default()
         .contains("selftest")
     {
-        if let Some(el) = doc.get_element_by_id("status") {
-            el.set_text_content(Some("RUNNING"));
-        }
+        net::note("RUNNING");
         wasm_bindgen_futures::spawn_local(async move {
-            let msg = match net::loopback_selftest().await {
-                Ok(s) => s,
-                Err(e) => format!("FAIL — {e:?}"),
-            };
-            if let Some(el) = web_sys::window()
-                .and_then(|w| w.document())
-                .and_then(|d| d.get_element_by_id("status"))
-            {
-                el.set_text_content(Some(&msg));
+            match net::loopback_selftest().await {
+                Ok(s) => net::note(&s),
+                Err(e) => net::note(&format!("FAIL — {e:?}")),
             }
         });
         return Ok(());
@@ -60,28 +44,19 @@ pub fn main() -> Result<(), JsValue> {
         .ok_or("no 2d context")?
         .dyn_into()?;
 
-    // The event log is the game. `game` is the fold, kept alongside it so we
-    // don't replay from scratch on every click.
-    let seed = (now() as u64) | 1;
-    let log = Rc::new(RefCell::new(vec![Event::Start {
-        seed,
-        w: W,
-        h: H,
-        mines: MINES,
-    }]));
-    let game = Rc::new(RefCell::new(Game::new(seed, W, H, MINES)));
-
-    draw(&ctx, &game.borrow());
+    let shared: app::Shared = Rc::new(RefCell::new(App::new(ctx, (now() as u64) | 1)));
+    shared.borrow().draw();
 
     {
-        let (log, game, ctx, c) = (log.clone(), game.clone(), ctx.clone(), canvas.clone());
+        let (shared, c) = (shared.clone(), canvas.clone());
         let on_down =
             Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
-                let ev = if game.borrow().status() != Status::Playing {
-                    // Any click on a finished board starts a new one.
-                    let seed = log.borrow().len() as u64 ^ 0x5DEE_CE66_D125;
+                let player = shared.borrow().player;
+                let ev = if shared.borrow().game.status() != Status::Playing {
+                    // Any click on a finished board starts a new one — and the
+                    // Start travels, so the peer restarts with the same seed.
                     Event::Start {
-                        seed,
+                        seed: (now() as u64) | 1,
                         w: W,
                         h: H,
                         mines: MINES,
@@ -91,14 +66,11 @@ pub fn main() -> Result<(), JsValue> {
                         return;
                     };
                     match e.button() {
-                        2 => Event::Flag { player: 0, x, y },
-                        _ => Event::Reveal { player: 0, x, y },
+                        2 => Event::Flag { player, x, y },
+                        _ => Event::Reveal { player, x, y },
                     }
                 };
-                // Append first, then fold. In phase 2 the append also sends.
-                log.borrow_mut().push(ev);
-                game.borrow_mut().apply(&ev);
-                draw(&ctx, &game.borrow());
+                app::local(&shared, ev);
             });
         canvas.add_event_listener_with_callback("mousedown", on_down.as_ref().unchecked_ref())?;
         on_down.forget();
@@ -111,10 +83,7 @@ pub fn main() -> Result<(), JsValue> {
     canvas.add_event_listener_with_callback("contextmenu", block.as_ref().unchecked_ref())?;
     block.forget();
 
-    // Leaked deliberately: dropping the Link drops the RtcDataChannel, which
-    // closes the connection. It has to outlive this function, and the page
-    // owns it for as long as the page exists.
-    std::mem::forget(sig::wire(&doc)?);
+    sig::wire(&doc, shared)?;
 
     Ok(())
 }
@@ -138,48 +107,4 @@ fn cell_at(canvas: &web_sys::HtmlCanvasElement, e: &web_sys::MouseEvent) -> Opti
         return None;
     }
     Some((x as u8, y as u8))
-}
-
-fn draw(ctx: &Ctx, game: &Game) {
-    let b = &game.board;
-    let over = game.status() != Status::Playing;
-
-    for y in 0..b.h {
-        for x in 0..b.w {
-            let c = b.get(x, y);
-            let (px, py) = (x as f64 * CELL, y as f64 * CELL);
-
-            // Once the game is over, mines come into view.
-            let fill = match (over && c.mine, c.state) {
-                (true, Reveal::Shown) => "#c0392b", // the one you hit
-                (true, _) => "#e8a5a0",             // the ones you missed
-                (false, Reveal::Shown) => "#dfe2e7",
-                (false, _) => "#b6bcc6",
-            };
-            ctx.set_fill_style_str(fill);
-            ctx.fill_rect(px, py, CELL - 1.0, CELL - 1.0);
-
-            if c.state == Reveal::Flagged {
-                ctx.set_fill_style_str("#c0392b");
-                ctx.fill_rect(px + 11.0, py + 8.0, 11.0, 13.0);
-            } else if c.state == Reveal::Shown && !c.mine && c.adj > 0 {
-                ctx.set_fill_style_str(DIGITS[c.adj as usize]);
-                ctx.set_font("bold 20px monospace");
-                let _ = ctx.fill_text(&c.adj.to_string(), px + 10.0, py + 24.0);
-            }
-        }
-    }
-
-    if over {
-        let (msg, colour) = match game.status() {
-            Status::Won => ("YOU WIN — click to restart", "#2e7d32"),
-            _ => ("BOOM — click to restart", "#c0392b"),
-        };
-        let w = b.w as f64 * CELL;
-        ctx.set_fill_style_str("rgba(20, 24, 32, 0.82)");
-        ctx.fill_rect(0.0, w / 2.0 - 22.0, w, 44.0);
-        ctx.set_fill_style_str(colour);
-        ctx.set_font("bold 15px monospace");
-        let _ = ctx.fill_text(msg, 14.0, w / 2.0 + 6.0);
-    }
 }

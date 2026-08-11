@@ -42,4 +42,5 @@ features = [
   "console",
   "RtcPeerConnectionState",
   "RtcIceConnectionState",
+  "RtcDataChannelType",
 ]
