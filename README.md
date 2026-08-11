@@ -50,12 +50,11 @@ symmetric-NAT cases — and will simply fail to connect.
 ## Roadmap
 
 - **Phase 1** — deterministic engine, canvas renderer, mouse input. *Done.*
-- **Phase 2** — WebRTC co-op. Wire format, handshake, link + QR signalling,
-  and event-log sync are *done*. Still open: move ordering under simultaneous
-  clicks, desync detection via `Game::hash()`, and reconnect.
-- **Phase 3** — make it pleasant. Not started. Everything so far has been
-  aimed at "does it work at all"; this is the pass that makes it a game
-  someone would choose to play.
+- **Phase 2** — WebRTC co-op. *Done.* Wire format, handshake, link + QR
+  signalling, event-log sync, and desync detection via `Game::hash()`.
+- **Phase 3** — make it pleasant. **Next.** Everything so far has been aimed
+  at "does it work at all"; this is the pass that makes it a game someone
+  would choose to play.
 
   *Connecting*
   - One contextual action instead of Host / Accept pasted / Copy sitting side
@@ -80,7 +79,15 @@ symmetric-NAT cases — and will simply fail to connect.
   - `Event::player` is carried in every event and never used. Show who
     revealed what, and where the other player is looking.
 
-- **Phase 4** — a wgpu renderer, *if it ever earns its place.* Parked, and
+- **Phase 4** — harden the sync. Deferred until the game is worth playing;
+  the failures it addresses are real but rare, and now reported rather than
+  silent.
+  - Total-order events by `(seq, player)` so the three ordering hazards
+    below cannot fire.
+  - Reconnect: channel drops, re-signal, compare log lengths, ship the
+    missing tail.
+
+- **Phase 5** — a wgpu renderer, *if it ever earns its place.* Parked, and
   possibly permanently.
 
   Minesweeper is a static grid that changes only on click. Canvas2D draws a
@@ -100,9 +107,27 @@ symmetric-NAT cases — and will simply fail to connect.
 
 ## Known gaps
 
-- Simultaneous clicks are not ordered. Reveals are idempotent and flag toggles
-  commute, so both sides still converge — but that is an argument, not a test.
-- Nothing compares `Game::hash()` between peers yet, so a divergence would go
-  unnoticed rather than being reported.
-- A dropped channel ends the session; there is no reconnect.
-- `wasm-opt` is disabled — see the comment in `.github/workflows/ci.yml`.
+**Flagging does not work on touch devices.** Input reads `mousedown` and
+`button()`, and there is no right-click on a phone. Every tap reveals.
+
+**Three ordering hazards.** Each peer applies its own move before hearing the
+other's, so the two logs are permutations. That is usually harmless — reveals
+commute once the board exists, and flags always commute — but three cases
+genuinely diverge. All three have tests in `engine/src/game.rs` asserting the
+divergence, so they are documented rather than assumed away:
+
+1. *The opening move.* Mines are placed on the first `Reveal`, seeded from
+   that cell. Two peers who each open a cell before hearing from the other are
+   playing different boards, not merely disagreeing about one square.
+2. *Reveal and flag on the same cell.* Reveal-then-flag opens it and ignores
+   the flag; flag-then-reveal leaves it flagged and opens nothing, because
+   `reveal` skips anything that is not `Hidden`.
+3. *A losing move.* `apply` ignores everything once the game is over, so a
+   mine hit first silences what came after it, and a mine hit last does not.
+
+The peers exchange a board hash after every move and report `DESYNC` when they
+differ, so these are visible when they happen. Preventing them is phase 4.
+
+**No reconnect.** A dropped channel ends the session.
+
+**`wasm-opt` is disabled** — see the comment in `.github/workflows/ci.yml`.
