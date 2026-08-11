@@ -132,4 +132,14 @@ symmetric-NAT cases — and will simply fail to connect.
 means one more link exchange — there is no signalling channel left over to do
 it silently.
 
+**A peer's disappearance takes a while to notice.** Nothing is sent when a tab
+simply closes, so the browser only reports the connection dead once its ICE
+consent checks time out — up to about half a minute. The status line says the
+other player has gone quiet as soon as the state wobbles, rather than leaving
+a board that has silently stopped moving.
+
+**The clock is per-device.** It starts at your first reveal, so someone who
+joins a game in progress sees their own elapsed time, not the host's. Nothing
+in the log records when the game began.
+
 **`wasm-opt` is disabled** — see the comment in `.github/workflows/ci.yml`.

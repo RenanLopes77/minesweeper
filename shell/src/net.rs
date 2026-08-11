@@ -247,14 +247,14 @@ pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str, on_drop: Rc<dyn F
             // Terminal: nothing is coming back from these.
             RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => on_drop(),
             RtcPeerConnectionState::Disconnected => {
-                log(&format!(
-                    "[{tag}] disconnected — waiting {}s",
-                    GRACE_MS / 1000
-                ));
+                // Say it out loud, not just in the log. The browser can take
+                // half a minute to call a peer gone, and a board that quietly
+                // stops moving looks like the game broke.
+                note("the other player went quiet — waiting to see if they come back");
                 let (p, on_drop) = (p.clone(), on_drop.clone());
                 let later = Closure::<dyn FnMut()>::new(move || {
                     if p.connection_state() == RtcPeerConnectionState::Connected {
-                        log(&format!("[{tag}] recovered on its own"));
+                        note("they are back");
                     } else {
                         on_drop();
                     }

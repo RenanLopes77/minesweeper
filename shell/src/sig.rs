@@ -311,6 +311,30 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
         cb.forget();
     }
 
+    // A link that arrives while the tab is already open only changes the
+    // fragment — the browser does not reload, so `main` never runs again and
+    // the check below would never see it. Pasting a link into the address bar
+    // of an open game is an ordinary thing to do.
+    {
+        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            let Some(offer) = offer_from_url() else {
+                return;
+            };
+            if role.get() == Role::Done {
+                return;
+            }
+            net::note("link in the address bar — answering…");
+            role.set(Role::Done);
+            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+            spawn_local(async move { join_flow(pc, app, ta, role, offer).await });
+        });
+        web_sys::window()
+            .ok_or("no window")?
+            .add_event_listener_with_callback("hashchange", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
     // Opened from a host's link: answer it without waiting to be asked.
     if let Some(offer) = offer_from_url() {
         net::note("opened from a link — answering…");

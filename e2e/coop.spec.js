@@ -104,6 +104,32 @@ test('losing the peer restores the handshake and keeps the board', async ({ brow
   await a.close();
 });
 
+/// Pasting a link into the address bar of a tab that already has the game open
+/// is a fragment-only navigation: the page never reloads, so the offer has to
+/// be picked up from `hashchange` rather than from startup.
+test('a link pasted into an already-open tab still joins', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+
+  await a.goto('/');
+  await a.locator('#go').click();
+  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  const offer = await a.locator('#sig').inputValue();
+
+  await b.goto('/'); // open first, *then* receive the link
+  await b.evaluate((url) => {
+    window.location.href = url;
+  }, offer);
+
+  await expect(b.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  await a.locator('#reply').fill(await b.locator('#sig').inputValue());
+  await expect(a.locator('#status')).toContainText('connected', { timeout: 30_000 });
+  await expect(b.locator('#status')).toContainText('connected', { timeout: 30_000 });
+
+  await a.close();
+  await b.close();
+});
+
 test('a fresh joiner adopts the host board, mid-game', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
