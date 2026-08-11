@@ -6,6 +6,7 @@
 //! move is also sent, and a remote move is not sent back.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use engine::{Board, Event, Game, Msg, Reveal, Status, decode_msg, encode_msg};
@@ -21,6 +22,35 @@ pub const SCALE: f64 = 2.0;
 /// `(w, h, mines)`, in the order the `#level` options appear. The classic
 /// three; anything else is a number nobody has an intuition for.
 pub const LEVELS: [(u8, u8, u16); 3] = [(9, 9, 10), (16, 16, 40), (30, 16, 99)];
+
+/// One colour each. Player 0 hosts, player 1 joins.
+pub const PLAYERS: [(&str, &str); 2] = [("#c0392b", "red"), ("#2b6fc8", "blue")];
+
+/// Who touched which cell, and where each player last played. Derived from the
+/// log on every draw instead of being stored, so it cannot drift from the
+/// board — the log is already the source of truth.
+#[derive(Default)]
+pub struct Presence {
+    pub owner: HashMap<(u8, u8), u8>,
+    pub last: [Option<(u8, u8)>; 2],
+}
+
+pub fn presence(log: &[Event]) -> Presence {
+    let mut p = Presence::default();
+    for ev in log {
+        match *ev {
+            // A new board wipes what came before it.
+            Event::Start { .. } => p = Presence::default(),
+            Event::Reveal { player, x, y } | Event::Flag { player, x, y } => {
+                p.owner.insert((x, y), player);
+                if let Some(slot) = p.last.get_mut(player as usize) {
+                    *slot = Some((x, y));
+                }
+            }
+        }
+    }
+    p
+}
 
 /// Classic Minesweeper digit colours. Index 0 is unused.
 const DIGITS: [&str; 9] = [
@@ -116,8 +146,13 @@ impl App {
             .and_then(|w| w.document())
             .and_then(|d| d.get_element_by_id("hud"))
         {
+            // The colour only means anything once someone else is here.
+            let me = match self.chan {
+                Some(_) => format!(" · you are {}", PLAYERS[self.player as usize].1),
+                None => String::new(),
+            };
             el.set_text_content(Some(&format!(
-                "{} flags left · {}s",
+                "{} flags left · {}s{me}",
                 mines_left(&self.game.board),
                 self.seconds()
             )));
@@ -211,6 +246,8 @@ pub fn on_connect(app: &Shared, is_host: bool) {
         a.send(&Msg::Events(log));
         a.send_state();
     }
+    // Our colour is only known now, and the HUD announces it.
+    a.refresh();
 }
 
 impl App {
@@ -232,6 +269,8 @@ impl App {
         }
         let _ = ctx.set_transform(SCALE, 0.0, 0.0, SCALE, 0.0, 0.0);
 
+        let who = presence(&self.log);
+
         for y in 0..b.h {
             for x in 0..b.w {
                 let c = b.get(x, y);
@@ -248,7 +287,10 @@ impl App {
                 ctx.fill_rect(px, py, CELL - 1.0, CELL - 1.0);
 
                 if c.state == Reveal::Flagged {
-                    ctx.set_fill_style_str("#c0392b");
+                    // The flag is whoever planted it, so a disagreement about
+                    // a cell is visible rather than argued about.
+                    let p = *who.owner.get(&(x, y)).unwrap_or(&0);
+                    ctx.set_fill_style_str(PLAYERS[p as usize % PLAYERS.len()].0);
                     ctx.fill_rect(px + 11.0, py + 8.0, 11.0, 13.0);
                 } else if c.state == Reveal::Shown && !c.mine && c.adj > 0 {
                     ctx.set_fill_style_str(DIGITS[c.adj as usize]);
@@ -256,6 +298,25 @@ impl App {
                     let _ = ctx.fill_text(&c.adj.to_string(), px + 10.0, py + 24.0);
                 }
             }
+        }
+
+        // Where the other player last played — the closest thing to seeing
+        // them without streaming a cursor over the channel.
+        for (i, spot) in who.last.iter().enumerate() {
+            let Some(&(x, y)) = spot.as_ref() else {
+                continue;
+            };
+            if i as u8 == self.player {
+                continue;
+            }
+            ctx.set_stroke_style_str(PLAYERS[i % PLAYERS.len()].0);
+            ctx.set_line_width(3.0);
+            ctx.stroke_rect(
+                x as f64 * CELL + 1.5,
+                y as f64 * CELL + 1.5,
+                CELL - 4.0,
+                CELL - 4.0,
+            );
         }
 
         if over {
@@ -282,11 +343,56 @@ mod tests {
         let mut g = Game::new(1, 9, 9, 10);
         assert_eq!(mines_left(&g.board), 10);
 
-        // Eleven flags: a full row of nine, then two on the next.
+        // Eleven flags: a full row of nine, then two on the next row.
         for (x, y) in (0..9).map(|x| (x, 0)).chain((0..2).map(|x| (x, 1))) {
             g.apply(&Event::Flag { player: 0, x, y });
         }
         // Eleven flags on a ten-mine board: the counter is flags, not mines.
         assert_eq!(mines_left(&g.board), -1);
+    }
+
+    #[test]
+    fn presence_attributes_cells_and_remembers_each_last_move() {
+        let log = [
+            Event::Start {
+                seed: 1,
+                w: 9,
+                h: 9,
+                mines: 10,
+            },
+            Event::Flag {
+                player: 0,
+                x: 1,
+                y: 1,
+            },
+            Event::Flag {
+                player: 1,
+                x: 2,
+                y: 2,
+            },
+            // Player 1 takes over a cell player 0 had.
+            Event::Reveal {
+                player: 1,
+                x: 1,
+                y: 1,
+            },
+        ];
+        let p = presence(&log);
+        assert_eq!(p.owner.get(&(1, 1)), Some(&1));
+        assert_eq!(p.owner.get(&(2, 2)), Some(&1));
+        assert_eq!(p.last, [Some((1, 1)), Some((1, 1))]);
+
+        // A restart mid-log wipes everything before it.
+        let restarted = presence(&[
+            log[1],
+            Event::Start {
+                seed: 2,
+                w: 9,
+                h: 9,
+                mines: 10,
+            },
+        ]);
+        assert!(restarted.owner.is_empty());
+        assert_eq!(restarted.last, [None, None]);
     }
 }

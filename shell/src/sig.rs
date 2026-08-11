@@ -399,9 +399,9 @@ fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str) {
             Ok(_) => {
                 display("handshake", "none");
                 net::note(if tag == "host" {
-                    "connected — you are player 1, both of you play the same board"
+                    "connected — you are red, they are blue, same board for both"
                 } else {
-                    "connected — you are player 2, both of you play the same board"
+                    "connected — you are blue, they are red, same board for both"
                 });
                 app::on_connect(&app, tag == "host");
             }

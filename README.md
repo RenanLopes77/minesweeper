@@ -74,9 +74,11 @@ symmetric-NAT cases — and will simply fail to connect.
   rather than blown up, so it stays sharp on a phone. Long-press flagging is
   still unbuilt; the toggle covers it without a timer.
 
-  *Presence*
-  - `Event::player` is carried in every event and never used. Show who
-    revealed what, and where the other player is looking.
+  *Presence.* **Done.** `Event::player` finally does something: flags are drawn
+  in the colour of whoever planted them, the other player's last move is ringed
+  in theirs, and the HUD says which colour you are. All of it is folded out of
+  the log at draw time — no extra state to drift, no cursor streaming over the
+  channel.
 
 - **Phase 4** — harden the sync. Deferred until the game is worth playing;
   the failures it addresses are real but rare, and now reported rather than
