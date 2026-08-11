@@ -283,11 +283,23 @@ fn accept(
     });
 }
 
-/// The offer carried in our own address bar, if we were opened from a link.
-fn offer_from_url() -> Option<String> {
+/// Is there an offer in our own address bar? Cheap and synchronous, so the
+/// decision to start a join can be made before the async decode.
+fn url_has_offer() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .is_some_and(|h| h.starts_with("#o="))
+}
+
+/// The offer carried in our own address bar. Goes through the same decode as
+/// a paste, which is what makes a compressed link work in the address bar as
+/// well as in the box.
+async fn offer_from_url() -> Option<String> {
     let hash = web_sys::window()?.location().hash().ok()?;
-    let rest = hash.strip_prefix("#o=")?;
-    String::from_utf8(b64::decode(rest)?).ok()
+    if !hash.starts_with("#o=") {
+        return None;
+    }
+    sdp_from_input(&hash).await
 }
 
 pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
@@ -397,16 +409,22 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     {
         let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let Some(offer) = offer_from_url() else {
-                return;
-            };
-            if role.get() == Role::Done {
+            if role.get() == Role::Done || !url_has_offer() {
                 return;
             }
             net::note("link in the address bar — answering…");
             role.set(Role::Done);
             let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
-            spawn_local(async move { join_flow(pc, app, ta, role, offer).await });
+            spawn_local(async move {
+                match offer_from_url().await {
+                    Some(offer) => join_flow(pc, app, ta, role, offer).await,
+                    None => {
+                        // Let them try again rather than sitting in Done.
+                        role.set(Role::Idle);
+                        net::note("that link did not decode — copy it again, all of it");
+                    }
+                }
+            });
         });
         web_sys::window()
             .ok_or("no window")?
@@ -415,11 +433,19 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     }
 
     // Opened from a host's link: answer it without waiting to be asked.
-    if let Some(offer) = offer_from_url() {
+    if url_has_offer() {
         net::note("opened from a link — answering…");
         role.set(Role::Done);
         let r = role.clone();
-        spawn_local(async move { join_flow(pc, app, ta, r, offer).await });
+        spawn_local(async move {
+            match offer_from_url().await {
+                Some(offer) => join_flow(pc, app, ta, r, offer).await,
+                None => {
+                    r.set(Role::Idle);
+                    net::note("that link did not decode — ask for it again");
+                }
+            }
+        });
     }
 
     Ok(())
