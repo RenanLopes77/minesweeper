@@ -9,6 +9,13 @@ pub enum Reveal {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status {
+    Playing,
+    Won,
+    Lost,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub mine: bool,
     pub adj: u8,
@@ -131,6 +138,25 @@ impl Board {
                 stack.extend(self.neighbors(cx, cy));
             }
         }
+    }
+
+    /// Derived, never stored. A stored copy is a cache, and every mutation
+    /// would have to remember to refresh it.
+    ///
+    /// Note what wins: flags are irrelevant. Flagging every mine does not
+    /// win the game — clearing every non-mine cell does.
+    pub fn status(&self) -> Status {
+        if self.cells.iter().any(|c| c.mine && c.state == Reveal::Shown) {
+            return Status::Lost;
+        }
+        if self
+            .cells
+            .iter()
+            .all(|c| c.mine || c.state == Reveal::Shown)
+        {
+            return Status::Won;
+        }
+        Status::Playing
     }
 
     pub fn toggle_flag(&mut self, x: u8, y: u8) {
@@ -290,7 +316,48 @@ mod tests {
         assert_eq!(shown, 1);
     }
 
+    #[test]
+    fn flagging_every_mine_does_not_win() {
+        let mut b = fixture();
+        for y in 0..5u8 {
+            b.toggle_flag(2, y); // every mine on the board, correctly flagged
+        }
+        assert_eq!(b.status(), Status::Playing);
+    }
+
+    #[test]
+    fn opening_a_mine_loses_immediately() {
+        let mut b = fixture();
+        b.reveal(2, 0);
+        assert_eq!(b.status(), Status::Lost);
+    }
+
+    #[test]
+    fn clearing_every_safe_cell_wins() {
+        let mut b = fixture();
+        for y in 0..5u8 {
+            for x in 0..5u8 {
+                if !b.get(x, y).mine {
+                    b.reveal(x, y);
+                }
+            }
+        }
+        assert_eq!(b.status(), Status::Won);
+    }
+
     proptest! {
+        #[test]
+        fn brute_force_clear_always_wins(seed: u64) {
+            let mut b = Board::new(9, 9, 10);
+            b.place_mines(seed, (4, 4));
+            for y in 0..9u8 {
+                for x in 0..9u8 {
+                    if !b.get(x, y).mine { b.reveal(x, y); }
+                }
+            }
+            prop_assert_eq!(b.status(), Status::Won);
+        }
+
         #[test]
         fn neighbor_count_is_3_5_or_8(x in 0u8..12, y in 0u8..12) {
             let b = Board::new(12, 12, 0);
