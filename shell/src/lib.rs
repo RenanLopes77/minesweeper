@@ -3,6 +3,7 @@ mod b64;
 mod net;
 mod qr;
 mod sig;
+mod zip;
 
 use std::cell::RefCell;
 use std::rc::Rc;

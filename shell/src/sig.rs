@@ -19,7 +19,7 @@ use web_sys::{
     Document, HtmlTextAreaElement, RtcDataChannel, RtcDataChannelType, RtcPeerConnection,
 };
 
-use crate::{app, b64, net};
+use crate::{app, b64, net, zip};
 
 /// Who we are in the handshake. Decides what a pasted link means.
 #[derive(Clone, Copy, PartialEq)]
@@ -34,8 +34,28 @@ enum Role {
 
 type Pc = Rc<RefCell<Option<RtcPeerConnection>>>;
 
-/// `#o=` for an offer, `#a=` for an answer.
-fn make_link(kind: char, sdp: &str) -> String {
+/// `#o=` for an offer, `#a=` for an answer. The SDP is deflated first — it is
+/// repetitive ASCII, so this is most of the difference between a QR code that
+/// scans and one that does not.
+async fn make_link(kind: char, sdp: &str) -> String {
+    let packed = match zip::deflate(sdp.as_bytes()).await {
+        Ok(bytes) => bytes,
+        // Compression is an optimisation, never a requirement: a peer that
+        // cannot deflate still gets a working, longer link.
+        Err(e) => {
+            net::log(&format!("deflate unavailable, sending plain: {e:?}"));
+            sdp.as_bytes().to_vec()
+        }
+    };
+    net::log(&format!(
+        "sdp {} bytes -> {} on the wire",
+        sdp.len(),
+        packed.len()
+    ));
+    link_of(kind, &packed)
+}
+
+fn link_of(kind: char, payload: &[u8]) -> String {
     let base = web_sys::window()
         .map(|w| {
             let l = w.location();
@@ -46,12 +66,24 @@ fn make_link(kind: char, sdp: &str) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{base}#{kind}={}", b64::encode(sdp.as_bytes()))
+    format!("{base}#{kind}={}", b64::encode(payload))
+}
+
+/// What a pasted string turned out to be.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Pasted {
+    /// Someone pasted the SDP itself. Nothing to decode.
+    Sdp(String),
+    /// Bytes out of a link. Deflated, unless it came from an older peer.
+    Packed(Vec<u8>),
 }
 
 /// Accepts whatever the user pasted: a whole link, a bare `#a=…` fragment,
 /// raw base64, or the SDP itself. People paste all four.
-fn sdp_from_input(s: &str) -> Option<String> {
+///
+/// Kept free of the decompression so it stays a pure function that the native
+/// tests can reach — `CompressionStream` only exists in a browser.
+fn shape_of(s: &str) -> Option<Pasted> {
     let t = s.trim();
     if t.is_empty() {
         return None;
@@ -59,7 +91,7 @@ fn sdp_from_input(s: &str) -> Option<String> {
     // Already an SDP: hand it back untouched. Trimming here is what ate the
     // final line's terminator once already — net::normalize_sdp owns cleanup.
     if t.starts_with("v=") {
-        return Some(s.to_string());
+        return Some(Pasted::Sdp(s.to_string()));
     }
     let payload = match t.rfind(['#', '=']) {
         Some(i) => &t[i + 1..],
@@ -68,7 +100,22 @@ fn sdp_from_input(s: &str) -> Option<String> {
     if payload.is_empty() {
         return None;
     }
-    String::from_utf8(b64::decode(payload)?).ok()
+    Some(Pasted::Packed(b64::decode(payload)?))
+}
+
+/// The SDP a paste carries, inflating it if it is compressed.
+async fn sdp_from_input(s: &str) -> Option<String> {
+    match shape_of(s)? {
+        Pasted::Sdp(sdp) => Some(sdp),
+        Pasted::Packed(bytes) => match zip::inflate(&bytes).await {
+            Ok(plain) => String::from_utf8(plain).ok(),
+            // Links made before the format was compressed are plain base64,
+            // and a stray paste can be anything at all. Both land here.
+            Err(_) => String::from_utf8(bytes)
+                .ok()
+                .filter(|s| s.starts_with("v=")),
+        },
+    }
 }
 
 /// Draws the link as a QR code, or hides the canvas if it cannot be drawn.
@@ -185,31 +232,55 @@ fn focus(id: &str) {
 }
 
 /// Acts on a link or SDP from anywhere — the box, the clipboard, the URL.
-/// Returns whether it started a flow; junk and half-typed text return false
-/// without complaining, because the box fires this on every keystroke.
+///
+/// `complain` is for the paths where the user pressed something and deserves
+/// an answer. The box itself fires on every keystroke, so half-typed text has
+/// to fail in silence.
 fn accept(
     pc: &Pc,
     app: &app::Shared,
     ta: &HtmlTextAreaElement,
     role: &Rc<Cell<Role>>,
     text: &str,
-) -> bool {
+    complain: bool,
+) {
     let was = role.get();
     if was == Role::Done {
-        return false;
+        return;
     }
-    let Some(sdp) = sdp_from_input(text) else {
-        return false;
-    };
-    role.set(Role::Done);
-    let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+    // Bail before the async hop on anything that is obviously not a link, so
+    // typing in the box does not queue work on every character.
+    if shape_of(text).is_none() {
+        if complain {
+            net::note("that does not look like a link — paste the whole thing");
+        }
+        return;
+    }
+    let (pc, app, ta, role, text) = (
+        pc.clone(),
+        app.clone(),
+        ta.clone(),
+        role.clone(),
+        text.to_string(),
+    );
     spawn_local(async move {
+        let Some(sdp) = sdp_from_input(&text).await else {
+            if complain {
+                net::note("that link did not decode — copy it again, all of it");
+            }
+            return;
+        };
+        // Re-check: decoding took a turn of the event loop, and a second
+        // paste may have got here first.
+        if role.get() == Role::Done {
+            return;
+        }
+        role.set(Role::Done);
         match was {
             Role::Host => finish_host(pc, &sdp).await,
             _ => join_flow(pc, app, ta, role, sdp).await,
         }
     });
-    true
 }
 
 /// The offer carried in our own address bar, if we were opened from a link.
@@ -262,7 +333,7 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
             src.clone(),
         );
         let cb = Closure::<dyn FnMut()>::new(move || {
-            accept(&pc, &app, &ta, &role, &s.value());
+            accept(&pc, &app, &ta, &role, &s.value(), false);
         });
         src.add_event_listener_with_callback("input", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -277,9 +348,7 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
             .ok_or("no #reply")?
             .dyn_into()?;
         let cb = Closure::<dyn FnMut()>::new(move || {
-            if !accept(&pc, &app, &ta, &role, &reply.value()) {
-                net::note("that does not look like a reply link — paste the whole thing");
-            }
+            accept(&pc, &app, &ta, &role, &reply.value(), true);
         });
         doc.get_element_by_id("connect")
             .ok_or("no #connect")?
@@ -306,11 +375,12 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
                     Some(p) => JsFuture::from(p).await.ok().and_then(|v| v.as_string()),
                     None => None,
                 };
-                match text {
-                    Some(t) if accept(&pc, &app, &ta, &role, &t) => {
-                        net::note("link read from clipboard — answering…")
+                match text.filter(|t| shape_of(t).is_some()) {
+                    Some(t) => {
+                        net::note("link read from clipboard — answering…");
+                        accept(&pc, &app, &ta, &role, &t, true);
                     }
-                    _ => net::note("paste the host's link into the box below"),
+                    None => net::note("paste the host's link into the box below"),
                 }
             });
         });
@@ -369,7 +439,7 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
     match net::make_offer(&conn).await {
         Ok((ch, sdp)) => {
             watch(ch, app, "host", pc.clone(), role.clone());
-            let link = make_link('o', &sdp);
+            let link = make_link('o', &sdp).await;
             ta.set_value(&link);
             copy(&ta);
             show_qr(&link);
@@ -428,7 +498,7 @@ async fn join_flow(
 
     match net::accept_offer(&conn, &offer).await {
         Ok(answer) => {
-            let link = make_link('a', &answer);
+            let link = make_link('a', &answer).await;
             ta.set_value(&link);
             copy(&ta);
             show_qr(&link);
@@ -508,23 +578,29 @@ fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str, pc: Pc, role: 
 mod tests {
     use super::*;
 
+    /// The decompression itself needs a browser, so what is checked here is
+    /// the part that decides *what a paste is* — every shape a person might
+    /// hand us has to come out as the same payload.
     #[test]
     fn input_accepts_every_shape_a_user_might_paste() {
         let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n";
-        let b64 = b64::encode(sdp.as_bytes());
+        let packed = b"not really deflate, but opaque bytes either way";
+        let b64 = b64::encode(packed);
+        let want = Pasted::Packed(packed.to_vec());
 
-        assert_eq!(sdp_from_input(sdp).as_deref(), Some(sdp));
-        assert_eq!(sdp_from_input(&b64).as_deref(), Some(sdp));
-        assert_eq!(sdp_from_input(&format!("#a={b64}")).as_deref(), Some(sdp));
+        // The SDP itself is passed through untouched, terminator and all.
+        assert_eq!(shape_of(sdp), Some(Pasted::Sdp(sdp.to_string())));
+        assert_eq!(shape_of(&b64), Some(want.clone()));
+        assert_eq!(shape_of(&format!("#a={b64}")), Some(want.clone()));
         assert_eq!(
-            sdp_from_input(&format!("  https://x.dev/mine/#o={b64}  ")).as_deref(),
-            Some(sdp)
+            shape_of(&format!("  https://x.dev/mine/#o={b64}  ")),
+            Some(want)
         );
     }
 
     #[test]
     fn input_rejects_junk() {
-        assert!(sdp_from_input("").is_none());
-        assert!(sdp_from_input("hello world").is_none());
+        assert!(shape_of("").is_none());
+        assert!(shape_of("hello world").is_none());
     }
 }

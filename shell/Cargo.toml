@@ -41,6 +41,15 @@ features = [
   "Location",
   "HtmlTextAreaElement",
   "HtmlSelectElement",
+
+  # Deflate, so the link in the QR code is a third of the size. The two
+  # stream constructors are declared in zip.rs — web-sys puts them behind
+  # --cfg=web_sys_unstable_apis, which would infect every build.
+  "ReadableStream",
+  "WritableStream",
+  "ReadableWritablePair",
+  "Blob",
+  "Response",
   "console",
   "RtcPeerConnectionState",
   "RtcIceConnectionState",
