@@ -19,8 +19,14 @@
     canvas { touch-action: none; cursor: pointer; }
     /* The bitmap is 2x the logical board so the browser downscales rather
        than upscales it — sharp on a phone, sharp on a hidpi laptop. */
-    #board { width: min(92vw, 34rem); height: auto; }
-    #controls { display: flex; flex-wrap: wrap; gap: .5rem; width: min(92vw, 34rem); }
+    /* Sized by the cell, not by a fixed width: whichever of the three limits
+       bites first wins. 34px a cell keeps Expert from filling a desktop; the
+       vh term keeps a tall board inside the window; the vw term is the phone.
+       --cols/--rows are set from Rust whenever the board changes shape. */
+    :root { --cols: 9; --rows: 9; --board: min(96vw, calc(var(--cols) * 34px), calc(70vh * var(--cols) / var(--rows))); }
+    #board { width: var(--board); height: auto; }
+    /* The controls track the board so the two line up at any size. */
+    #controls { display: flex; flex-wrap: wrap; gap: .5rem; width: var(--board); }
     #hud { font: 15px ui-monospace, monospace; color: #dfe2e7; letter-spacing: .05em; }
     #banner {
       font: bold 15px ui-monospace, monospace; letter-spacing: .05em;

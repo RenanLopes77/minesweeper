@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use engine::{Board, Event, Game, Msg, Reveal, Stamped, Status, decode_msg, encode_msg};
+use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
 use crate::net;
@@ -368,6 +369,17 @@ impl App {
         if self.canvas.width() != bw || self.canvas.height() != bh {
             self.canvas.set_width(bw);
             self.canvas.set_height(bh);
+            // CSS sizes the board from these: how many cells across and down,
+            // not how many pixels. Expert is 30 wide and would otherwise be
+            // squeezed into the same width as a 9-wide Beginner board.
+            if let Some(root) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.document_element())
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = root.style().set_property("--cols", &b.w.to_string());
+                let _ = root.style().set_property("--rows", &b.h.to_string());
+            }
         }
         let _ = ctx.set_transform(SCALE, 0.0, 0.0, SCALE, 0.0, 0.0);
 
