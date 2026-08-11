@@ -328,6 +328,10 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
+    // Claim the role now, not when the channel opens: the peer's opening log
+    // can arrive before `on_open` resolves, and `remote` decides what to do
+    // with it by asking whether we are the host.
+    app.borrow_mut().player = 0;
     net::trace_states(&conn, "host", on_drop(&app, &pc, &role));
     match net::make_offer(&conn).await {
         Ok((ch, sdp)) => {
@@ -369,6 +373,8 @@ async fn join_flow(
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
+    // Same reason as in `host_flow`: the host's log may beat our `on_open`.
+    app.borrow_mut().player = 1;
     net::trace_states(&conn, "join", on_drop(&app, &pc, &role));
     net::log(&format!(
         "[join] their candidates: {}",

@@ -13,6 +13,28 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d as Ctx;
 
+thread_local! {
+    /// The live app, so the browser tests can ask what the board actually is.
+    /// Nothing in the game reads this — see `debug_hash` below.
+    static APP: RefCell<Option<app::Shared>> = const { RefCell::new(None) };
+}
+
+/// The board hash, as hex, for the end-to-end tests. Two peers agreeing on
+/// this is the entire sync guarantee, and it is otherwise invisible from JS.
+#[wasm_bindgen]
+pub fn debug_hash() -> String {
+    APP.with(|a| match a.borrow().as_ref() {
+        Some(app) => format!("{:016x}", app.borrow().game.hash()),
+        None => String::new(),
+    })
+}
+
+/// How many events are in the log. Tells a test whether a merge landed.
+#[wasm_bindgen]
+pub fn debug_log_len() -> usize {
+    APP.with(|a| a.borrow().as_ref().map_or(0, |app| app.borrow().log.len()))
+}
+
 #[wasm_bindgen(start)]
 pub fn main() -> Result<(), JsValue> {
     let win = web_sys::window().ok_or("no window")?;
@@ -52,6 +74,7 @@ pub fn main() -> Result<(), JsValue> {
         canvas.clone(),
         (now() as u64) | 1,
     )));
+    APP.with(|a| *a.borrow_mut() = Some(shared.clone()));
     shared.borrow().draw();
 
     {

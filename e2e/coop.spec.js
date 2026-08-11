@@ -1,0 +1,126 @@
+import { test, expect } from '@playwright/test';
+
+// Two real pages, a real DataChannel, and the same link exchange a human
+// would do. Everything the unit tests cannot reach — the DOM wiring and the
+// handshake — is only ever exercised here.
+
+const CELL = 32; // logical px; the canvas is 2x that and CSS-scaled
+
+/// Clicks a board cell by its grid coordinates, whatever the canvas is scaled to.
+async function clickCell(page, cx, cy, button = 'left') {
+  const board = page.locator('#board');
+  const box = await board.boundingBox();
+  const size = await board.evaluate((c) => c.width / 2); // logical px across
+  const scale = box.width / size;
+  await board.click({
+    button,
+    position: { x: (cx + 0.5) * CELL * scale, y: (cy + 0.5) * CELL * scale },
+  });
+}
+
+const hash = (page) => page.evaluate(() => window.wasmBindings.debug_hash());
+const logLen = (page) => page.evaluate(() => window.wasmBindings.debug_log_len());
+
+/// Host on `a`, join on `b`, and come back once both say they are connected.
+/// `reload` is false when `a` is already mid-game — navigating would throw
+/// away the very log the reconnect is supposed to preserve.
+async function connect(a, b, { reload = true } = {}) {
+  if (reload) await a.goto('/');
+  await a.locator('#go').click();
+  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  const offer = await a.locator('#sig').inputValue();
+
+  // Opening the link is the joiner's whole job: the page answers by itself.
+  await b.goto(offer);
+  await expect(b.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  const reply = await b.locator('#sig').inputValue();
+
+  // fill() fires `input`, which is what the page listens for.
+  await a.locator('#reply').fill(reply);
+  await expect(a.locator('#status')).toContainText('connected', { timeout: 30_000 });
+  await expect(b.locator('#status')).toContainText('connected', { timeout: 30_000 });
+}
+
+test('two peers play the same board', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  // The flag goes down first, on a board that is still entirely hidden — a
+  // reveal can flood over any given cell, and flagging an open cell is a
+  // no-op, which would make this assertion depend on the seed.
+  await clickCell(b, 8, 0, 'right');
+  await clickCell(a, 4, 4);
+  await clickCell(b, 0, 8);
+
+  await expect.poll(() => logLen(a)).toBe(4);
+  await expect.poll(() => logLen(b)).toBe(4);
+  expect(await hash(a)).toBe(await hash(b));
+  expect(await hash(a)).not.toBe('');
+
+  // The flag is on both boards, so the counter moved on both.
+  await expect(a.locator('#hud')).toContainText('9 flags left');
+  await expect(b.locator('#hud')).toContainText('9 flags left');
+
+  await a.close();
+  await b.close();
+});
+
+test('a move made before the peer is heard from still converges', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  // Both open a cell in the same tick: this is hazard 1 — the opening move —
+  // which used to leave the two of them on different mine layouts.
+  await Promise.all([clickCell(a, 0, 0), clickCell(b, 8, 8)]);
+
+  await expect.poll(() => logLen(a)).toBe(3);
+  await expect.poll(() => logLen(b)).toBe(3);
+  await expect.poll(async () => (await hash(a)) === (await hash(b))).toBe(true);
+  await expect(a.locator('#status')).not.toContainText('DESYNC');
+  await expect(b.locator('#status')).not.toContainText('DESYNC');
+
+  await a.close();
+  await b.close();
+});
+
+test('losing the peer restores the handshake and keeps the board', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  await clickCell(a, 4, 4);
+  await expect.poll(() => logLen(b)).toBe(2);
+  const before = await hash(a);
+
+  await b.close(); // the peer walks away
+
+  await expect(a.locator('#status')).toContainText('connection lost', { timeout: 30_000 });
+  await expect(a.locator('#handshake')).toBeVisible();
+  await expect(a.locator('#go')).toHaveText('Host a game');
+  expect(await hash(a)).toBe(before); // the board survived the drop
+
+  await a.close();
+});
+
+test('a fresh joiner adopts the host board, mid-game', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  await clickCell(a, 4, 4);
+  await clickCell(a, 1, 1, 'right');
+  await expect.poll(() => logLen(b)).toBe(3);
+  await b.close();
+  await expect(a.locator('#status')).toContainText('connection lost', { timeout: 30_000 });
+
+  // Someone new joins the game already in progress and gets the whole log.
+  const c = await browser.newPage();
+  await connect(a, c, { reload: false });
+  await expect.poll(() => logLen(c)).toBe(3);
+  expect(await hash(c)).toBe(await hash(a));
+
+  await a.close();
+  await c.close();
+});

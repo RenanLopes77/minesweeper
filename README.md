@@ -38,6 +38,13 @@ agreement rather than the only thing standing between you and a silent split.
 
     cargo test --workspace       # engine tests, native, fast
     cd shell && trunk serve      # http://127.0.0.1:8080
+    cd e2e && npx playwright test  # two real browsers, real WebRTC
+
+The end-to-end tests are the only thing that exercises the DOM wiring and the
+handshake: two pages swap links exactly as a human would, then play. They
+compare `debug_hash()` — the board hash both peers are supposed to agree on —
+which is exported from the shell for this and nothing else. First run needs
+`npm install && npx playwright install chromium` in `e2e/`.
 
 `index.html` lives in `shell/`, not the repo root: trunk cannot build from a
 virtual workspace with no root package.
