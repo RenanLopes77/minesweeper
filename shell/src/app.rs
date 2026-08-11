@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use engine::{Event, Game, Msg, Reveal, Status, decode_msg, encode_msg};
+use engine::{Board, Event, Game, Msg, Reveal, Status, decode_msg, encode_msg};
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
 use crate::net;
@@ -37,8 +37,22 @@ pub struct App {
     /// modifier. It also works with a mouse.
     pub flag_mode: bool,
     pub chan: Option<RtcDataChannel>,
+    /// Wall-clock milliseconds at the first reveal and at game over. The clock
+    /// only starts when the board does, and freezes when it ends.
+    start_ms: Option<f64>,
+    end_ms: Option<f64>,
     ctx: Ctx,
     canvas: web_sys::HtmlCanvasElement,
+}
+
+/// Flags outstanding: the classic counter, which counts flags rather than
+/// mines and so goes negative if you over-flag.
+pub fn mines_left(b: &Board) -> i32 {
+    let flagged = (0..b.h)
+        .flat_map(|y| (0..b.w).map(move |x| (x, y)))
+        .filter(|&(x, y)| b.get(x, y).state == Reveal::Flagged)
+        .count();
+    b.mines as i32 - flagged as i32
 }
 
 pub type Shared = Rc<RefCell<App>>;
@@ -52,6 +66,8 @@ impl App {
             player: 0,
             flag_mode: false,
             chan: None,
+            start_ms: None,
+            end_ms: None,
             ctx,
             canvas,
         }
@@ -64,6 +80,47 @@ impl App {
             .filter(|c| c.ready_state() == web_sys::RtcDataChannelState::Open)
         {
             let _ = ch.send_with_u8_array(&encode_msg(msg));
+        }
+    }
+
+    /// Everything that has to happen after the board changes: run the clock,
+    /// repaint, update the two numbers above the board.
+    fn refresh(&mut self) {
+        let playing = self.game.status() == Status::Playing;
+        let opened = self.log.iter().any(|e| matches!(e, Event::Reveal { .. }));
+        if !opened {
+            // A fresh board, from New game or from adopting the host's log.
+            self.start_ms = None;
+        } else if self.start_ms.is_none() {
+            self.start_ms = Some(js_sys::Date::now());
+        }
+        self.end_ms = match (playing, self.end_ms) {
+            (true, _) => None,
+            (false, None) => Some(js_sys::Date::now()),
+            (false, e) => e,
+        };
+        self.draw();
+        self.hud();
+    }
+
+    /// Seconds on the clock: live while playing, frozen once it is over.
+    fn seconds(&self) -> u32 {
+        let Some(start) = self.start_ms else {
+            return 0;
+        };
+        ((self.end_ms.unwrap_or_else(js_sys::Date::now) - start) / 1000.0).max(0.0) as u32
+    }
+
+    fn hud(&self) {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("hud"))
+        {
+            el.set_text_content(Some(&format!(
+                "{} flags left · {}s",
+                mines_left(&self.game.board),
+                self.seconds()
+            )));
         }
     }
 
@@ -84,7 +141,12 @@ pub fn local(app: &Shared, ev: Event) {
     a.game.apply(&ev);
     a.send(&Msg::Events(vec![ev]));
     a.send_state();
-    a.draw();
+    a.refresh();
+}
+
+/// Called once a second, so the clock moves between moves.
+pub fn tick(app: &Shared) {
+    app.borrow().hud();
 }
 
 /// Bytes from the peer. This is a trust boundary: `decode_log` returns None
@@ -114,7 +176,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                     a.log.push(*ev);
                 }
             }
-            a.draw();
+            a.refresh();
             // Answer with where that left us, so they can check too.
             a.send_state();
         }
@@ -208,5 +270,23 @@ impl App {
             ctx.set_font("bold 15px monospace");
             let _ = ctx.fill_text(msg, 14.0, mid + 6.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_left_counts_down_and_can_go_negative() {
+        let mut g = Game::new(1, 9, 9, 10);
+        assert_eq!(mines_left(&g.board), 10);
+
+        // Eleven flags: a full row of nine, then two on the next.
+        for (x, y) in (0..9).map(|x| (x, 0)).chain((0..2).map(|x| (x, 1))) {
+            g.apply(&Event::Flag { player: 0, x, y });
+        }
+        // Eleven flags on a ten-mine board: the counter is flags, not mines.
+        assert_eq!(mines_left(&g.board), -1);
     }
 }

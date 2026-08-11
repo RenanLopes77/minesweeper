@@ -134,6 +134,18 @@ pub fn main() -> Result<(), JsValue> {
         restart.forget();
     }
 
+    // The clock has to move between moves, and a move is the only other thing
+    // that redraws. One interval for the life of the page.
+    {
+        let shared = shared.clone();
+        let tick = Closure::<dyn FnMut()>::new(move || app::tick(&shared));
+        win.set_interval_with_callback_and_timeout_and_arguments_0(
+            tick.as_ref().unchecked_ref(),
+            1000,
+        )?;
+        tick.forget();
+    }
+
     // Otherwise right-click opens the browser menu instead of flagging.
     let block = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(|e: web_sys::MouseEvent| {
         e.prevent_default();

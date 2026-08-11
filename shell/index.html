@@ -21,6 +21,7 @@
        than upscales it — sharp on a phone, sharp on a hidpi laptop. */
     #board { width: min(92vw, 34rem); height: auto; }
     #controls { display: flex; flex-wrap: wrap; gap: .5rem; width: min(92vw, 34rem); }
+    #hud { font: 15px ui-monospace, monospace; color: #dfe2e7; letter-spacing: .05em; }
     select {
       flex: 1; padding: .5rem; font: inherit; color: #dfe2e7;
       background: #2b3038; border: 1px solid #3a424e;
@@ -56,6 +57,7 @@
   </style>
 </head>
 <body>
+  <div id="hud">10 flags left &middot; 0s</div>
   <canvas id="board" width="576" height="576"></canvas>
   <div id="controls">
     <button id="flag" type="button">Flag mode: off</button>
