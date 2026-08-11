@@ -39,10 +39,32 @@ jobs:
         run: |
           curl -sSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xzf- -C /usr/local/bin
+      # index.html sets data-wasm-opt="0" so trunk never fetches binaryen —
+      # its bundled TLS stack rejects GitHub's release cert
+      # ("UnsupportedCertVersion") and there is no retry that fixes it.
+      # We run wasm-opt ourselves, from apt, below.
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+
       # Pages serves this repo at /<repo>/, so asset URLs need that prefix.
       # Without --public-url the page loads and the wasm 404s.
       - run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
         working-directory: shell
+
+      # Best effort: roughly halves the payload, but a shipped-and-large page
+      # beats a blocked deploy, so a failure here is a warning.
+      - name: optimise wasm
+        run: |
+          for f in shell/dist/*.wasm; do
+            before=$(stat -c%s "$f")
+            if wasm-opt -Oz --enable-bulk-memory -o "$f.opt" "$f"; then
+              mv "$f.opt" "$f"
+              echo "$f: $before -> $(stat -c%s "$f") bytes"
+            else
+              rm -f "$f.opt"
+              echo "::warning::wasm-opt failed, shipping unoptimised $f ($before bytes)"
+            fi
+          done
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: shell/dist
