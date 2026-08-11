@@ -94,6 +94,19 @@ pub struct App {
     canvas: web_sys::HtmlCanvasElement,
 }
 
+/// Whether the current board has been opened yet. Only events after the last
+/// `Start` count: a restart leaves the old moves in the log, and they must not
+/// keep the clock running on a board nobody has touched.
+pub fn opened_since_restart(log: &[Stamped]) -> bool {
+    let from = log
+        .iter()
+        .rposition(|s| matches!(s.ev, Event::Start { .. }))
+        .map_or(0, |i| i + 1);
+    log[from..]
+        .iter()
+        .any(|s| matches!(s.ev, Event::Reveal { .. }))
+}
+
 /// Flags outstanding: the classic counter, which counts flags rather than
 /// mines and so goes negative if you over-flag.
 pub fn mines_left(b: &Board) -> i32 {
@@ -154,10 +167,7 @@ impl App {
     /// repaint, update the two numbers above the board.
     fn refresh(&mut self) {
         let playing = self.game.status() == Status::Playing;
-        let opened = self
-            .log
-            .iter()
-            .any(|s| matches!(s.ev, Event::Reveal { .. }));
+        let opened = opened_since_restart(&self.log);
         if !opened {
             // A fresh board, from New game or from adopting the host's log.
             self.start_ms = None;
@@ -522,6 +532,36 @@ mod tests {
         assert_eq!(ours.len(), 4, "three moves and the Start");
         // And the seq order, not arrival order, is what survives.
         assert!(ours.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// The clock runs for the board in front of you, not for the log.
+    #[test]
+    fn a_restart_puts_the_clock_back_to_stopped() {
+        let reveal = stamp(
+            1,
+            Event::Reveal {
+                player: 0,
+                x: 1,
+                y: 1,
+            },
+        );
+        assert!(!opened_since_restart(&[start(1)]));
+        assert!(opened_since_restart(&[start(1), reveal]));
+        // New game: the old reveal is still in the log and must not count.
+        assert!(!opened_since_restart(&[start(1), reveal, start(2)]));
+        assert!(opened_since_restart(&[
+            start(1),
+            reveal,
+            start(2),
+            stamp(
+                3,
+                Event::Reveal {
+                    player: 1,
+                    x: 2,
+                    y: 2
+                }
+            )
+        ]));
     }
 
     #[test]
