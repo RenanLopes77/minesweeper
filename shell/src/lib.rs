@@ -7,7 +7,7 @@ mod sig;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use app::{App, CELL, H, MINES, W};
+use app::{App, CELL, LEVELS};
 use engine::{Event, Status};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -45,11 +45,13 @@ pub fn main() -> Result<(), JsValue> {
         .get_context("2d")?
         .ok_or("no 2d context")?
         .dyn_into()?;
-    // The bitmap is 2x the logical board (see index.html); everything below
-    // draws in logical pixels and this scales it up once.
-    ctx.scale(app::SCALE, app::SCALE)?;
-
-    let shared: app::Shared = Rc::new(RefCell::new(App::new(ctx, (now() as u64) | 1)));
+    // The bitmap is 2x the logical board (see index.html); `draw` sizes the
+    // canvas and reapplies that scale, because the board can change size.
+    let shared: app::Shared = Rc::new(RefCell::new(App::new(
+        ctx,
+        canvas.clone(),
+        (now() as u64) | 1,
+    )));
     shared.borrow().draw();
 
     {
@@ -57,24 +59,22 @@ pub fn main() -> Result<(), JsValue> {
         let on_down =
             Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
                 let player = shared.borrow().player;
-                let ev = if shared.borrow().game.status() != Status::Playing {
-                    // Any click on a finished board starts a new one — and the
-                    // Start travels, so the peer restarts with the same seed.
-                    Event::Start {
-                        seed: (now() as u64) | 1,
-                        w: W,
-                        h: H,
-                        mines: MINES,
-                    }
+                // A finished board is done: New game restarts it. Clicking on
+                // it used to restart by accident.
+                if shared.borrow().game.status() != Status::Playing {
+                    return;
+                }
+                let (w, h) = {
+                    let b = &shared.borrow().game.board;
+                    (b.w, b.h)
+                };
+                let Some((x, y)) = cell_at(&c, &e, w, h) else {
+                    return;
+                };
+                let ev = if e.button() == 2 || shared.borrow().flag_mode {
+                    Event::Flag { player, x, y }
                 } else {
-                    let Some((x, y)) = cell_at(&c, &e) else {
-                        return;
-                    };
-                    if e.button() == 2 || shared.borrow().flag_mode {
-                        Event::Flag { player, x, y }
-                    } else {
-                        Event::Reveal { player, x, y }
-                    }
+                    Event::Reveal { player, x, y }
                 };
                 app::local(&shared, ev);
             });
@@ -107,6 +107,33 @@ pub fn main() -> Result<(), JsValue> {
         on_flag.forget();
     }
 
+    // New game, at whatever the picker says. The Start travels, so the peer
+    // restarts on the same board — difficulty is agreed by whoever presses it.
+    {
+        let level: web_sys::HtmlSelectElement = doc
+            .get_element_by_id("level")
+            .ok_or("no #level")?
+            .dyn_into()?;
+        let shared = shared.clone();
+        let restart = Closure::<dyn FnMut()>::new(move || {
+            let i = (level.selected_index().max(0) as usize).min(LEVELS.len() - 1);
+            let (w, h, mines) = LEVELS[i];
+            app::local(
+                &shared,
+                Event::Start {
+                    seed: (now() as u64) | 1,
+                    w,
+                    h,
+                    mines,
+                },
+            );
+        });
+        doc.get_element_by_id("restart")
+            .ok_or("no #restart")?
+            .add_event_listener_with_callback("click", restart.as_ref().unchecked_ref())?;
+        restart.forget();
+    }
+
     // Otherwise right-click opens the browser menu instead of flagging.
     let block = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(|e: web_sys::MouseEvent| {
         e.prevent_default();
@@ -128,13 +155,18 @@ extern "C" {
 
 /// Pixel -> cell. `get_bounding_client_rect` is what makes this survive CSS
 /// scaling, page scroll, and high-DPI displays.
-fn cell_at(canvas: &web_sys::HtmlCanvasElement, e: &web_sys::MouseEvent) -> Option<(u8, u8)> {
+fn cell_at(
+    canvas: &web_sys::HtmlCanvasElement,
+    e: &web_sys::MouseEvent,
+    w: u8,
+    h: u8,
+) -> Option<(u8, u8)> {
     let r = canvas.get_bounding_client_rect();
-    let sx = W as f64 * CELL / r.width();
-    let sy = H as f64 * CELL / r.height();
+    let sx = w as f64 * CELL / r.width();
+    let sy = h as f64 * CELL / r.height();
     let x = ((e.client_x() as f64 - r.left()) * sx / CELL).floor();
     let y = ((e.client_y() as f64 - r.top()) * sy / CELL).floor();
-    if x < 0.0 || y < 0.0 || x >= W as f64 || y >= H as f64 {
+    if x < 0.0 || y < 0.0 || x >= w as f64 || y >= h as f64 {
         return None;
     }
     Some((x as u8, y as u8))

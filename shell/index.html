@@ -19,8 +19,12 @@
     canvas { touch-action: none; cursor: pointer; }
     /* The bitmap is 2x the logical board so the browser downscales rather
        than upscales it — sharp on a phone, sharp on a hidpi laptop. */
-    #board { width: min(92vw, 20rem); height: auto; }
-    #controls { display: flex; gap: .5rem; width: min(92vw, 20rem); }
+    #board { width: min(92vw, 34rem); height: auto; }
+    #controls { display: flex; flex-wrap: wrap; gap: .5rem; width: min(92vw, 34rem); }
+    select {
+      flex: 1; padding: .5rem; font: inherit; color: #dfe2e7;
+      background: #2b3038; border: 1px solid #3a424e;
+    }
     #signalling, #handshake { display: grid; gap: .5rem; width: min(90vw, 30rem); }
     .row { display: flex; gap: .5rem; }
     button {
@@ -55,6 +59,12 @@
   <canvas id="board" width="576" height="576"></canvas>
   <div id="controls">
     <button id="flag" type="button">Flag mode: off</button>
+    <select id="level">
+      <option>Beginner — 9x9, 10 mines</option>
+      <option>Intermediate — 16x16, 40 mines</option>
+      <option>Expert — 30x16, 99 mines</option>
+    </select>
+    <button id="restart" type="button">New game</button>
   </div>
   <p id="status">Solo game. To play together: press Host, or paste a link you were sent.</p>
 
@@ -66,7 +76,6 @@
       </div>
       <textarea id="sig" rows="2" spellcheck="false"
         placeholder="Or paste a link here — it is acted on the moment it lands."></textarea>
-      <canvas id="qr" width="0" height="0"></canvas>
       <!-- Only the host ever needs this, and only after their link exists. -->
       <section id="replybox">
         <p><strong>Step 2</strong> — they answered with a reply link. Paste it here.</p>
@@ -74,6 +83,7 @@
           placeholder="Paste their reply link"></textarea>
         <button id="connect" type="button">Connect</button>
       </section>
+      <canvas id="qr" width="0" height="0"></canvas>
     </div>
     <pre id="log"></pre>
   </section>

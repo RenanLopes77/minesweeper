@@ -17,9 +17,10 @@ pub const CELL: f64 = 32.0;
 /// Canvas bitmap pixels per logical pixel. The canvas element is 2x the board
 /// so CSS can shrink it to the viewport without softening the digits.
 pub const SCALE: f64 = 2.0;
-pub const W: u8 = 9;
-pub const H: u8 = 9;
-pub const MINES: u16 = 10;
+
+/// `(w, h, mines)`, in the order the `#level` options appear. The classic
+/// three; anything else is a number nobody has an intuition for.
+pub const LEVELS: [(u8, u8, u16); 3] = [(9, 9, 10), (16, 16, 40), (30, 16, 99)];
 
 /// Classic Minesweeper digit colours. Index 0 is unused.
 const DIGITS: [&str; 9] = [
@@ -37,24 +38,22 @@ pub struct App {
     pub flag_mode: bool,
     pub chan: Option<RtcDataChannel>,
     ctx: Ctx,
+    canvas: web_sys::HtmlCanvasElement,
 }
 
 pub type Shared = Rc<RefCell<App>>;
 
 impl App {
-    pub fn new(ctx: Ctx, seed: u64) -> Self {
+    pub fn new(ctx: Ctx, canvas: web_sys::HtmlCanvasElement, seed: u64) -> Self {
+        let (w, h, mines) = LEVELS[0];
         App {
-            game: Game::new(seed, W, H, MINES),
-            log: vec![Event::Start {
-                seed,
-                w: W,
-                h: H,
-                mines: MINES,
-            }],
+            game: Game::new(seed, w, h, mines),
+            log: vec![Event::Start { seed, w, h, mines }],
             player: 0,
             flag_mode: false,
             chan: None,
             ctx,
+            canvas,
         }
     }
 
@@ -158,6 +157,19 @@ impl App {
         let b = &self.game.board;
         let over = self.game.status() != Status::Playing;
 
+        // The board can change size under us — a restart at another
+        // difficulty, or the host's log arriving. Resizing the canvas also
+        // wipes the transform, so the scale is reapplied every draw.
+        let (bw, bh) = (
+            (b.w as f64 * CELL * SCALE) as u32,
+            (b.h as f64 * CELL * SCALE) as u32,
+        );
+        if self.canvas.width() != bw || self.canvas.height() != bh {
+            self.canvas.set_width(bw);
+            self.canvas.set_height(bh);
+        }
+        let _ = ctx.set_transform(SCALE, 0.0, 0.0, SCALE, 0.0, 0.0);
+
         for y in 0..b.h {
             for x in 0..b.w {
                 let c = b.get(x, y);
@@ -186,15 +198,15 @@ impl App {
 
         if over {
             let (msg, colour) = match self.game.status() {
-                Status::Won => ("YOU WIN — click to restart", "#2e7d32"),
-                _ => ("BOOM — click to restart", "#c0392b"),
+                Status::Won => ("YOU WIN — press New game", "#2e7d32"),
+                _ => ("BOOM — press New game", "#c0392b"),
             };
-            let w = b.w as f64 * CELL;
+            let (w, mid) = (b.w as f64 * CELL, b.h as f64 * CELL / 2.0);
             ctx.set_fill_style_str("rgba(20, 24, 32, 0.82)");
-            ctx.fill_rect(0.0, w / 2.0 - 22.0, w, 44.0);
+            ctx.fill_rect(0.0, mid - 22.0, w, 44.0);
             ctx.set_fill_style_str(colour);
             ctx.set_font("bold 15px monospace");
-            let _ = ctx.fill_text(msg, 14.0, w / 2.0 + 6.0);
+            let _ = ctx.fill_text(msg, 14.0, mid + 6.0);
         }
     }
 }

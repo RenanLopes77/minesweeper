@@ -63,12 +63,11 @@ symmetric-NAT cases — and will simply fail to connect.
   is acted on without a second press; the panel disappears once connected and
   the status line says which player you are.
 
-  *The game*
-  - Choose board size and mine count. `Event::Start` already carries `w`,
-    `h`, and `mines` — nothing but the UI is missing.
-  - A lobby: pick difficulty before hosting, so both sides agree up front.
-  - Deliberate restart button rather than "click anywhere on a dead board".
-  - Show mines remaining, and a timer.
+  *The game.* Beginner / Intermediate / Expert from a picker, and a New game
+  button that starts one — the `Start` travels, so whoever presses it sets the
+  difficulty for both. Clicking a dead board no longer restarts it. The canvas
+  resizes itself to whatever the board became.
+  - Still missing: mines remaining, and a timer.
 
   *Touch.* **Done.** A flag-mode toggle replaces the missing right button, and
   the canvas is a 2x bitmap scaled by CSS to `min(92vw, 20rem)` — downscaled
