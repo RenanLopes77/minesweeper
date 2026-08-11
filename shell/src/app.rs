@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use engine::{Event, Game, Reveal, Status, decode_log, encode_log};
+use engine::{Event, Game, Msg, Reveal, Status, decode_msg, encode_msg};
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
 use crate::net;
@@ -51,14 +51,23 @@ impl App {
         }
     }
 
-    fn send(&self, events: &[Event]) {
+    fn send(&self, msg: &Msg) {
         if let Some(ch) = self
             .chan
             .as_ref()
             .filter(|c| c.ready_state() == web_sys::RtcDataChannelState::Open)
         {
-            let _ = ch.send_with_u8_array(&encode_log(events));
+            let _ = ch.send_with_u8_array(&encode_msg(msg));
         }
+    }
+
+    /// Announces what our board looks like now. The peer compares it against
+    /// its own and shouts if they differ — eight bytes instead of a board.
+    fn send_state(&self) {
+        self.send(&Msg::State {
+            count: self.log.len() as u32,
+            hash: self.game.hash(),
+        });
     }
 }
 
@@ -67,7 +76,8 @@ pub fn local(app: &Shared, ev: Event) {
     let mut a = app.borrow_mut();
     a.log.push(ev);
     a.game.apply(&ev);
-    a.send(&[ev]);
+    a.send(&Msg::Events(vec![ev]));
+    a.send_state();
     a.draw();
 }
 
@@ -75,28 +85,51 @@ pub fn local(app: &Shared, ev: Event) {
 /// for anything malformed and we drop the message rather than acting on half
 /// of it.
 pub fn remote(app: &Shared, bytes: &[u8]) {
-    let Some(events) = decode_log(bytes) else {
+    let Some(msg) = decode_msg(bytes) else {
         net::log(&format!("dropped {} malformed bytes", bytes.len()));
         return;
     };
-
     let mut a = app.borrow_mut();
-    // A message that opens with Start is a whole log, not a move: the host
-    // sends one when the channel opens so the joiner adopts its seed. No
-    // framing needed — Start can only ever mean "here is the game".
-    if matches!(events.first(), Some(Event::Start { .. })) {
-        if let Some(g) = Game::replay(&events) {
-            net::log(&format!("adopted host log, {} events", events.len()));
-            a.game = g;
-            a.log = events;
+
+    match msg {
+        Msg::Events(events) => {
+            // A message that opens with Start is a whole log, not a move: the
+            // host sends one when the channel opens so the joiner adopts its
+            // seed. Start can only ever mean "here is the game".
+            if matches!(events.first(), Some(Event::Start { .. })) {
+                if let Some(g) = Game::replay(&events) {
+                    net::log(&format!("adopted host log, {} events", events.len()));
+                    a.game = g;
+                    a.log = events;
+                }
+            } else {
+                for ev in &events {
+                    a.game.apply(ev);
+                    a.log.push(*ev);
+                }
+            }
+            a.draw();
+            // Answer with where that left us, so they can check too.
+            a.send_state();
         }
-    } else {
-        for ev in &events {
-            a.game.apply(ev);
-            a.log.push(*ev);
+        Msg::State { count, hash } => {
+            // Only meaningful at the same point in the log. Different counts
+            // mean one side is simply behind, which happens constantly.
+            if count as usize != a.log.len() {
+                return;
+            }
+            let ours = a.game.hash();
+            if ours == hash {
+                return;
+            }
+            // The two boards disagree. Recovery is ch16; for now, say so
+            // loudly rather than letting the players discover it by losing.
+            net::note("DESYNC — boards no longer match");
+            net::log(&format!(
+                "desync at event {count}: ours {ours:016x}, theirs {hash:016x}"
+            ));
         }
     }
-    a.draw();
 }
 
 /// Called when the channel opens. The host hands over the log it already has,
@@ -106,8 +139,9 @@ pub fn on_connect(app: &Shared, is_host: bool) {
     a.player = if is_host { 0 } else { 1 };
     if is_host {
         let log = a.log.clone();
-        a.send(&log);
         net::log(&format!("sent log, {} events", log.len()));
+        a.send(&Msg::Events(log));
+        a.send_state();
     }
 }
 

@@ -71,6 +71,56 @@ impl Event {
     }
 }
 
+/// What one DataChannel message can be.
+///
+/// The event stream alone cannot carry a checksum, so messages get a one-byte
+/// envelope. Two kinds is all this needs: moves, and "here is what my board
+/// looks like now".
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Msg {
+    Events(Vec<Event>),
+    /// The sender's board hash after applying `count` events. Compared only
+    /// when the receiver is also at `count` — different counts just mean one
+    /// side is behind, which is normal and not a desync.
+    State {
+        count: u32,
+        hash: u64,
+    },
+}
+
+const MSG_EVENTS: u8 = 0x00;
+const MSG_STATE: u8 = 0x01;
+const STATE_LEN: usize = 13;
+
+pub fn encode_msg(msg: &Msg) -> Vec<u8> {
+    match msg {
+        Msg::Events(events) => {
+            let mut out = vec![MSG_EVENTS];
+            out.extend_from_slice(&encode_log(events));
+            out
+        }
+        Msg::State { count, hash } => {
+            let mut out = vec![MSG_STATE];
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&hash.to_le_bytes());
+            out
+        }
+    }
+}
+
+/// Same trust rules as `decode_log`: a peer wrote these bytes, so anything
+/// unexpected returns None instead of being partially believed.
+pub fn decode_msg(bytes: &[u8]) -> Option<Msg> {
+    match *bytes.first()? {
+        MSG_EVENTS => decode_log(&bytes[1..]).map(Msg::Events),
+        MSG_STATE if bytes.len() == STATE_LEN => Some(Msg::State {
+            count: u32::from_le_bytes(bytes[1..5].try_into().ok()?),
+            hash: u64::from_le_bytes(bytes[5..13].try_into().ok()?),
+        }),
+        _ => None,
+    }
+}
+
 pub fn encode_log(events: &[Event]) -> Vec<u8> {
     let mut out = Vec::with_capacity(events.len() * MOVE_LEN);
     for ev in events {
@@ -208,6 +258,34 @@ mod tests {
     }
 
     #[test]
+    fn state_message_round_trips() {
+        let m = Msg::State {
+            count: 7,
+            hash: 0x0102_0304_0506_0708,
+        };
+        let bytes = encode_msg(&m);
+        assert_eq!(bytes.len(), STATE_LEN);
+        assert_eq!(decode_msg(&bytes), Some(m));
+    }
+
+    #[test]
+    fn state_message_rejects_wrong_length() {
+        let full = encode_msg(&Msg::State { count: 1, hash: 2 });
+        for cut in 1..full.len() {
+            assert!(decode_msg(&full[..cut]).is_none(), "accepted {cut} bytes");
+        }
+        let mut long = full.clone();
+        long.push(0);
+        assert!(decode_msg(&long).is_none(), "accepted a trailing byte");
+    }
+
+    #[test]
+    fn unknown_message_kind_is_rejected() {
+        assert!(decode_msg(&[0x7F, 0, 0, 0]).is_none());
+        assert!(decode_msg(&[]).is_none());
+    }
+
+    #[test]
     fn empty_log_round_trips() {
         assert_eq!(decode_log(&encode_log(&[])), Some(vec![]));
     }
@@ -249,6 +327,13 @@ mod tests {
         #[test]
         fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
             let _ = decode_log(&bytes);
+            let _ = decode_msg(&bytes);
+        }
+
+        #[test]
+        fn event_messages_round_trip(evs in prop::collection::vec(any_event(), 0..64)) {
+            let m = Msg::Events(evs);
+            prop_assert_eq!(decode_msg(&encode_msg(&m)), Some(m));
         }
     }
 }

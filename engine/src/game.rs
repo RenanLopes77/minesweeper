@@ -222,7 +222,182 @@ mod tests {
         );
     }
 
+    fn start() -> Event {
+        Event::Start {
+            seed: 11,
+            w: 9,
+            h: 9,
+            mines: 10,
+        }
+    }
+
+    /// **The first reveal decides the whole board.** Mines are placed on the
+    /// first Reveal, using that cell as the safe zone — so two peers whose
+    /// first reveals differ do not merely disagree about one cell, they are
+    /// playing different games.
+    ///
+    /// In practice the host ships its log on connect, so both sides share a
+    /// first reveal. The hazard is both peers opening their first cell before
+    /// either has heard from the other.
+    #[test]
+    fn the_first_reveal_decides_the_board() {
+        let p = Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        };
+        let q = Event::Reveal {
+            player: 1,
+            x: 7,
+            y: 2,
+        };
+        let a = Game::replay(&[start(), p, q]).unwrap();
+        let b = Game::replay(&[start(), q, p]).unwrap();
+        assert_ne!(
+            a.hash(),
+            b.hash(),
+            "if these agree, placement no longer depends on the first click"
+        );
+    }
+
+    /// A losing move silences every move after it, so if one peer's ordering
+    /// puts the mine first and the other's puts it last, the boards differ.
+    ///
+    /// Third and last of the ordering hazards, after the opening reveal and
+    /// same-cell reveal/flag. All three are why ch14 exists.
+    #[test]
+    fn a_lost_game_makes_order_matter() {
+        let opened = Event::Reveal {
+            player: 0,
+            x: 0,
+            y: 0,
+        };
+        let base = Game::replay(&[start(), opened]).unwrap();
+
+        let cells = || (0..9u8).flat_map(|y| (0..9u8).map(move |x| (x, y)));
+        let (mx, my) = cells().find(|&(x, y)| base.board.get(x, y).mine).unwrap();
+        let (sx, sy) = cells()
+            .find(|&(x, y)| {
+                let c = base.board.get(x, y);
+                !c.mine && c.state == crate::Reveal::Hidden
+            })
+            .unwrap();
+
+        let boom = Event::Reveal {
+            player: 0,
+            x: mx,
+            y: my,
+        };
+        let safe = Event::Reveal {
+            player: 1,
+            x: sx,
+            y: sy,
+        };
+
+        let a = Game::replay(&[start(), opened, boom, safe]).unwrap();
+        let b = Game::replay(&[start(), opened, safe, boom]).unwrap();
+        assert_eq!(a.status(), Status::Lost);
+        assert_eq!(b.status(), Status::Lost);
+        assert_ne!(a.hash(), b.hash(), "the safe cell opened in only one order");
+    }
+
+    /// Flags are toggles, so applying both peers' flags in either order lands
+    /// in the same place.
+    #[test]
+    fn flags_in_either_order_agree() {
+        let start = Event::Start {
+            seed: 11,
+            w: 9,
+            h: 9,
+            mines: 10,
+        };
+        let p = Event::Flag {
+            player: 0,
+            x: 1,
+            y: 1,
+        };
+        let q = Event::Flag {
+            player: 1,
+            x: 5,
+            y: 5,
+        };
+        let a = Game::replay(&[start, p, q]).unwrap();
+        let b = Game::replay(&[start, q, p]).unwrap();
+        assert_eq!(a.hash(), b.hash());
+    }
+
+    /// ...but a reveal and a flag on the SAME cell do not commute, and this is
+    /// the one case that can genuinely desync two peers.
+    ///
+    /// Reveal-then-flag: the cell opens, and the flag is ignored because it is
+    /// already Shown. Flag-then-reveal: the cell is Flagged, and `reveal` skips
+    /// anything that is not Hidden — so nothing opens at all.
+    ///
+    /// Two peers clicking the same cell at the same moment, one revealing and
+    /// one flagging, each apply their own first. They end up with different
+    /// boards. Nothing here fixes that; the hash comparison in the shell exists
+    /// to *notice* it, and ch14's ordering is what will prevent it.
+    #[test]
+    fn reveal_and_flag_on_one_cell_do_not_commute() {
+        let start = Event::Start {
+            seed: 11,
+            w: 9,
+            h: 9,
+            mines: 10,
+        };
+        let reveal = Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        };
+        let flag = Event::Flag {
+            player: 1,
+            x: 4,
+            y: 4,
+        };
+        let a = Game::replay(&[start, reveal, flag]).unwrap();
+        let b = Game::replay(&[start, flag, reveal]).unwrap();
+        assert_ne!(
+            a.hash(),
+            b.hash(),
+            "if these ever agree, ordering has been fixed — update this test"
+        );
+    }
+
     proptest! {
+        /// Reveals commute at any size, *given the board already exists*. This
+        /// is what makes ordinary simultaneous play safe with no ordering
+        /// protocol: only the opening move and same-cell reveal/flag races
+        /// need ch14.
+        #[test]
+        fn reveals_after_placement_agree_in_any_order(
+            seed: u64,
+            moves in prop::collection::vec((0u8..9, 0u8..9), 0..20),
+        ) {
+            let start = Event::Start { seed, w: 9, h: 9, mines: 10 };
+            // Fixes the mine layout before the moves under test.
+            let opened = Event::Reveal { player: 0, x: 0, y: 0 };
+            let evs: Vec<Event> = moves
+                .iter()
+                .map(|&(x, y)| Event::Reveal { player: 0, x, y })
+                .collect();
+
+            let mut forward = vec![start, opened];
+            forward.extend(evs.iter().copied());
+            let mut backward = vec![start, opened];
+            backward.extend(evs.iter().rev().copied());
+
+            let a = Game::replay(&forward).unwrap();
+            let b = Game::replay(&backward).unwrap();
+
+            // Only meaningful while nobody has lost: a mine ends the game and
+            // silences whatever came after it, which is order-dependent by
+            // design. That case is covered by a_lost_game_makes_order_matter.
+            if a.status() == Status::Playing && b.status() == Status::Playing {
+                prop_assert_eq!(a.hash(), b.hash());
+            }
+        }
+
         /// The property that makes peer-to-peer safe: same log in, same hash out.
         #[test]
         fn identical_logs_agree(
