@@ -53,8 +53,7 @@ symmetric-NAT cases — and will simply fail to connect.
 - **Phase 2** — WebRTC co-op. Wire format, handshake, link + QR signalling,
   and event-log sync are *done*. Still open: move ordering under simultaneous
   clicks, desync detection via `Game::hash()`, and reconnect.
-- **Phase 3** — wgpu renderer behind the same interface. Not started.
-- **Phase 4** — make it pleasant. Not started. Everything so far has been
+- **Phase 3** — make it pleasant. Not started. Everything so far has been
   aimed at "does it work at all"; this is the pass that makes it a game
   someone would choose to play.
 
@@ -80,6 +79,24 @@ symmetric-NAT cases — and will simply fail to connect.
   *Presence*
   - `Event::player` is carried in every event and never used. Show who
     revealed what, and where the other player is looking.
+
+- **Phase 4** — a wgpu renderer, *if it ever earns its place.* Parked, and
+  possibly permanently.
+
+  Minesweeper is a static grid that changes only on click. Canvas2D draws a
+  few thousand cells in well under a millisecond, and there is no frame loop
+  because there is nothing to animate. wgpu would mean several hundred lines
+  of adapter/device/surface/pipeline setup plus a texture atlas to replace
+  `fill_text` — to produce the same picture, with more to break on a phone.
+
+  Reasons that would change the answer: boards large enough that per-cell
+  CPU work matters, smooth zoom and pan over them, or effects (explosions,
+  shader transitions) that canvas cannot do well. Wanting to learn wgpu also
+  counts — but as a learning project, not as something this game needs.
+
+  The engine/shell split means this stays cheap to reconsider: the renderer
+  is the only thing that would change, and every engine test would still
+  pass. That was worth designing for even if it is never used.
 
 ## Known gaps
 
