@@ -54,6 +54,32 @@ symmetric-NAT cases — and will simply fail to connect.
   and event-log sync are *done*. Still open: move ordering under simultaneous
   clicks, desync detection via `Game::hash()`, and reconnect.
 - **Phase 3** — wgpu renderer behind the same interface. Not started.
+- **Phase 4** — make it pleasant. Not started. Everything so far has been
+  aimed at "does it work at all"; this is the pass that makes it a game
+  someone would choose to play.
+
+  *Connecting*
+  - One contextual action instead of Host / Accept pasted / Copy sitting side
+    by side with no indication of which to press or when.
+  - Say what to do next at each step, and what state the connection is in.
+  - Auto-copy the link when it is generated; auto-accept a pasted reply.
+  - Hide the whole signalling panel once connected, show who is here instead.
+
+  *The game*
+  - Choose board size and mine count. `Event::Start` already carries `w`,
+    `h`, and `mines` — nothing but the UI is missing.
+  - A lobby: pick difficulty before hosting, so both sides agree up front.
+  - Deliberate restart button rather than "click anywhere on a dead board".
+  - Show mines remaining, and a timer.
+
+  *Touch*
+  - **Flagging is impossible on a phone.** Input is `mousedown` + `button()`,
+    and there is no right-click on touch. Long-press, or a flag-mode toggle.
+  - The canvas is a fixed 288px; it should scale to the viewport.
+
+  *Presence*
+  - `Event::player` is carried in every event and never used. Show who
+    revealed what, and where the other player is looking.
 
 ## Known gaps
 
