@@ -130,7 +130,7 @@ pub async fn accept_answer(pc: &RtcPeerConnection, answer_sdp: &str) -> Result<(
 // it later — which is exactly the ordering WebRTC needs.
 // ---------------------------------------------------------------------------
 
-fn on_data_channel(pc: &RtcPeerConnection) -> JsFuture {
+pub fn on_data_channel(pc: &RtcPeerConnection) -> JsFuture {
     let pc = pc.clone();
     JsFuture::from(Promise::new(&mut |resolve, _reject| {
         let cb = Closure::<dyn FnMut(web_sys::RtcDataChannelEvent)>::new(
@@ -147,7 +147,7 @@ fn on_data_channel(pc: &RtcPeerConnection) -> JsFuture {
 /// race as `wait_for_ice`. By the time the answer is applied, the caller's
 /// channel is usually *already* open, so `onopen` fired before anyone was
 /// listening and awaiting it would hang forever.
-fn on_open(ch: &RtcDataChannel) -> JsFuture {
+pub fn on_open(ch: &RtcDataChannel) -> JsFuture {
     let ch2 = ch.clone();
     JsFuture::from(Promise::new(&mut |resolve, _reject| {
         if ch2.ready_state() == RtcDataChannelState::Open {
@@ -180,7 +180,7 @@ fn on_message(ch: &RtcDataChannel) -> JsFuture {
 
 /// Writes progress into #status. When a WebRTC handshake stalls it stalls
 /// silently, so knowing which await never returned is most of the diagnosis.
-fn note(stage: &str) {
+pub fn note(stage: &str) {
     if let Some(el) = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("status"))

@@ -38,4 +38,5 @@ features = [
   "RtcDataChannelState",
   "MessageEvent",
   "Location",
+  "HtmlTextAreaElement",
 ]

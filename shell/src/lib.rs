@@ -1,4 +1,5 @@
 mod net;
+mod sig;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -109,6 +110,11 @@ pub fn main() -> Result<(), JsValue> {
     });
     canvas.add_event_listener_with_callback("contextmenu", block.as_ref().unchecked_ref())?;
     block.forget();
+
+    // Leaked deliberately: dropping the Link drops the RtcDataChannel, which
+    // closes the connection. It has to outlive this function, and the page
+    // owns it for as long as the page exists.
+    std::mem::forget(sig::wire(&doc)?);
 
     Ok(())
 }

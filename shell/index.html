@@ -17,10 +17,33 @@
       font: 13px ui-monospace, monospace;
     }
     canvas { touch-action: none; cursor: pointer; }
+    #signalling { display: grid; gap: .5rem; width: min(90vw, 30rem); }
+    .row { display: flex; gap: .5rem; }
+    button {
+      flex: 1; padding: .5rem; cursor: pointer;
+      font: inherit; color: #dfe2e7;
+      background: #2b3038; border: 1px solid #3a424e;
+    }
+    button:hover { background: #353c46; }
+    textarea {
+      font: 11px/1.4 ui-monospace, monospace;
+      color: #b6bcc6; background: #12161d;
+      border: 1px solid #2a323e; padding: .5rem;
+      resize: vertical; width: 100%;
+    }
   </style>
 </head>
 <body>
   <canvas id="board" width="288" height="288"></canvas>
   <p id="status">left-click reveal &middot; right-click flag</p>
+
+  <section id="signalling">
+    <div class="row">
+      <button id="host" type="button">Host</button>
+      <button id="accept" type="button">Accept pasted</button>
+    </div>
+    <textarea id="sig" rows="4" spellcheck="false"
+      placeholder="Host: press Host, copy this, paste the reply back here.&#10;Join: paste their offer, press Accept, send the reply back."></textarea>
+  </section>
 </body>
 </html>
