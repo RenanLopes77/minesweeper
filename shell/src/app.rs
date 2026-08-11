@@ -240,20 +240,28 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
 
     match msg {
         Msg::Events(events) => {
-            // A message that opens with Start is a whole log, not a move: the
-            // host sends one when the channel opens so the joiner adopts its
-            // seed. Start can only ever mean "here is the game".
-            if matches!(
-                events.first(),
-                Some(Stamped {
-                    ev: Event::Start { .. },
-                    ..
-                })
-            ) {
-                net::log(&format!("adopted host log, {} events", events.len()));
-                a.log = events;
+            // A log that opens with a *different* Start is a different game,
+            // not moves to fold in: the host's, on a fresh join. The joiner
+            // takes it; the host never abandons its own game for a peer's.
+            let other_game = matches!(events.first(), Some(s) if matches!(s.ev, Event::Start { .. })
+                && Some(s) != a.log.first());
+            if other_game {
+                if a.player != 0 {
+                    net::log(&format!("adopted host log, {} events", events.len()));
+                    a.log = events;
+                }
             } else {
-                merge(&mut a.log, &events);
+                // Same game: this is either a move or a whole log arriving
+                // after a reconnect. Merging handles both, and handles them
+                // being partly or entirely things we already know.
+                let new = merge(&mut a.log, &events);
+                if events.len() > 1 {
+                    net::log(&format!(
+                        "merged {} events, {}",
+                        events.len(),
+                        if new { "some were new" } else { "all known" }
+                    ));
+                }
             }
             // Our clock must outrun anything we have now seen, or our next
             // move would sort before a move that has already happened.
@@ -283,17 +291,20 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
     }
 }
 
-/// Called when the channel opens. The host hands over the log it already has,
-/// which is what makes both sides agree on the seed.
+/// Called when the channel opens — the first time, or again after a drop.
+///
+/// Both sides hand over the whole log. On a fresh join that is what settles
+/// the seed; on a reconnect it is the catch-up, because merging two logs of
+/// the same game is exactly "ship the missing tail" in both directions at
+/// once. The log is small enough that asking which events are missing would
+/// cost more than sending them.
 pub fn on_connect(app: &Shared, is_host: bool) {
     let mut a = app.borrow_mut();
     a.player = if is_host { 0 } else { 1 };
-    if is_host {
-        let log = a.log.clone();
-        net::log(&format!("sent log, {} events", log.len()));
-        a.send(&Msg::Events(log));
-        a.send_state();
-    }
+    let log = a.log.clone();
+    net::log(&format!("sent log, {} events", log.len()));
+    a.send(&Msg::Events(log));
+    a.send_state();
     // Our colour is only known now, and the HUD announces it.
     a.refresh();
 }
@@ -493,6 +504,24 @@ mod tests {
                 .hash()
         };
         assert_eq!(fold(&ours), fold(&peer));
+    }
+
+    /// Reconnect: each side played on while the channel was down, then they
+    /// swap whole logs. Nobody has to work out which events are missing.
+    #[test]
+    fn swapping_whole_logs_catches_both_sides_up() {
+        let flag = |seq, player, x| stamp(seq, Event::Flag { player, x, y: 0 });
+        let mut ours = vec![start(7), flag(1, 0, 1), flag(3, 0, 2)];
+        let mut theirs = vec![start(7), flag(2, 1, 5)];
+
+        let (ours_before, theirs_before) = (ours.clone(), theirs.clone());
+        assert!(merge(&mut ours, &theirs_before));
+        assert!(merge(&mut theirs, &ours_before));
+
+        assert_eq!(ours, theirs);
+        assert_eq!(ours.len(), 4, "three moves and the Start");
+        // And the seq order, not arrival order, is what survives.
+        assert!(ours.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

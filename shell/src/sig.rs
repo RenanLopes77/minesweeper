@@ -125,6 +125,45 @@ fn display(id: &str, value: &str) {
     }
 }
 
+/// Back to the state the page loads in, minus the game itself: the board and
+/// its log survive a dropped channel, so reconnecting is a fresh handshake
+/// over an old game.
+fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>) {
+    *pc.borrow_mut() = None;
+    role.set(Role::Idle);
+    for id in ["sig", "reply"] {
+        if let Some(ta) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(id))
+            .and_then(|e| e.dyn_into::<HtmlTextAreaElement>().ok())
+        {
+            ta.set_value("");
+        }
+    }
+    display("handshake", "grid");
+    display("join", "block");
+    display("replybox", "none");
+    display("qr", "none");
+    set_go("Host a game");
+}
+
+/// The channel is gone. Called from the channel's own `onclose` and from the
+/// connection state machine, whichever notices first — hence the guard.
+fn dropped(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>) {
+    if app.borrow().chan.is_none() {
+        return;
+    }
+    app.borrow_mut().chan = None;
+    reset_handshake(pc, role);
+    net::note("connection lost — your board is kept. Host again, or paste a new link.");
+}
+
+/// `dropped` as something the state machine can hold on to.
+fn on_drop(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>) -> Rc<dyn Fn()> {
+    let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
+    Rc::new(move || dropped(&app, &pc, &role))
+}
+
 /// Puts the caret where the next paste belongs.
 fn focus(id: &str) {
     if let Some(el) = web_sys::window()
@@ -154,11 +193,11 @@ fn accept(
         return false;
     };
     role.set(Role::Done);
-    let (pc, app, ta) = (pc.clone(), app.clone(), ta.clone());
+    let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
     spawn_local(async move {
         match was {
             Role::Host => finish_host(pc, &sdp).await,
-            _ => join_flow(pc, app, ta, sdp).await,
+            _ => join_flow(pc, app, ta, role, sdp).await,
         }
     });
     true
@@ -276,7 +315,8 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     if let Some(offer) = offer_from_url() {
         net::note("opened from a link — answering…");
         role.set(Role::Done);
-        spawn_local(async move { join_flow(pc, app, ta, offer).await });
+        let r = role.clone();
+        spawn_local(async move { join_flow(pc, app, ta, r, offer).await });
     }
 
     Ok(())
@@ -288,10 +328,10 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
-    net::trace_states(&conn, "host");
+    net::trace_states(&conn, "host", on_drop(&app, &pc, &role));
     match net::make_offer(&conn).await {
         Ok((ch, sdp)) => {
-            watch(ch, app, "host");
+            watch(ch, app, "host", pc.clone(), role.clone());
             let link = make_link('o', &sdp);
             ta.set_value(&link);
             copy(&ta);
@@ -317,13 +357,19 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
     }
 }
 
-async fn join_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, offer: String) {
+async fn join_flow(
+    pc: Pc,
+    app: app::Shared,
+    ta: HtmlTextAreaElement,
+    role: Rc<Cell<Role>>,
+    offer: String,
+) {
     net::note("gathering candidates…");
     let conn = match net::new_connection() {
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
-    net::trace_states(&conn, "join");
+    net::trace_states(&conn, "join", on_drop(&app, &pc, &role));
     net::log(&format!(
         "[join] their candidates: {}",
         net::candidate_summary(&offer)
@@ -333,10 +379,10 @@ async fn join_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, offer: Str
     // moment the connection completes.
     let incoming = net::on_data_channel(&conn);
     {
-        let app = app.clone();
+        let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
         spawn_local(async move {
             if let Ok(Ok(ch)) = incoming.await.map(|v| v.dyn_into::<RtcDataChannel>()) {
-                watch(ch, app, "join");
+                watch(ch, app, "join", pc, role);
             }
         });
     }
@@ -374,7 +420,7 @@ async fn finish_host(pc: Pc, answer: &str) {
 
 /// Stores the channel and reports when it opens. Both sides end up here — the
 /// host from `create_data_channel`, the joiner from `ondatachannel`.
-fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str) {
+fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str, pc: Pc, role: Rc<Cell<Role>>) {
     net::log(&format!("[{tag}] channel {:?}", ch.ready_state()));
 
     // Default binaryType is "blob", which would hand us a Blob needing an
@@ -390,6 +436,15 @@ fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str) {
             });
         ch.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
         on_msg.forget();
+    }
+
+    // A drop is not the end of the game: the log stays, the handshake comes
+    // back, and reconnecting merges whatever each side missed.
+    {
+        let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
+        let on_close = Closure::<dyn FnMut()>::new(move || dropped(&app, &pc, &role));
+        ch.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+        on_close.forget();
     }
 
     let opened = net::on_open(&ch);

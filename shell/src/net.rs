@@ -8,13 +8,15 @@
 //!
 //! Cost: the handshake takes a second or two longer. Benefit: no server.
 
+use std::rc::Rc;
+
 use js_sys::{Promise, Reflect};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     RtcConfiguration, RtcDataChannel, RtcDataChannelState, RtcIceGatheringState, RtcIceServer,
-    RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit,
+    RtcPeerConnection, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit,
 };
 
 /// A public STUN server. This is the one piece of infrastructure the project
@@ -228,10 +230,22 @@ pub fn candidate_summary(sdp: &str) -> String {
 /// `connectionState` is the overall verdict; `iceConnectionState` is the
 /// transport underneath it. A handshake that accepts an answer and then goes
 /// quiet is stuck in one of these.
-pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str) {
+/// `on_drop` fires when the connection stops being usable. A channel's own
+/// `onclose` covers a polite hangup; this covers the network vanishing, where
+/// the state machine notices and the channel may not.
+pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str, on_drop: Rc<dyn Fn()>) {
     let p = pc.clone();
     let cb = Closure::<dyn FnMut()>::new(move || {
-        log(&format!("[{tag}] connection: {:?}", p.connection_state()));
+        let state = p.connection_state();
+        log(&format!("[{tag}] connection: {state:?}"));
+        if matches!(
+            state,
+            RtcPeerConnectionState::Failed
+                | RtcPeerConnectionState::Disconnected
+                | RtcPeerConnectionState::Closed
+        ) {
+            on_drop();
+        }
     });
     pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
     cb.forget();

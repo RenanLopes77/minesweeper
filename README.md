@@ -93,8 +93,12 @@ symmetric-NAT cases — and will simply fail to connect.
     why order of arrival no longer matters. The three hazards that used to
     diverge — the opening move, reveal-versus-flag on one cell, and a losing
     move — cannot fire now that both sides fold the same sequence.
-  - Reconnect: channel drops, re-signal, compare log lengths, ship the
-    missing tail. *Next.*
+  - Reconnect. **Done.** A drop — the channel closing, or the connection
+    failing outright — brings the handshake panel back with the board and its
+    log intact. Hosting or pasting a new link reconnects, and both sides then
+    hand over their whole log: merging two logs of the same game *is* shipping
+    the missing tail, in both directions, without either side working out what
+    the other lacks.
 
 - **Phase 5** — a wgpu renderer, *if it ever earns its place.* Parked, and
   possibly permanently.
@@ -116,6 +120,8 @@ symmetric-NAT cases — and will simply fail to connect.
 
 ## Known gaps
 
-**No reconnect.** A dropped channel ends the session.
+**Reconnecting needs a new handshake.** The link is single-use, so coming back
+means one more link exchange — there is no signalling channel left over to do
+it silently.
 
 **`wasm-opt` is disabled** — see the comment in `.github/workflows/ci.yml`.
