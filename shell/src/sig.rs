@@ -58,13 +58,18 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
                     Ok(c) => c,
                     Err(e) => return net::note(&format!("connection failed: {e:?}")),
                 };
+                net::trace_states(&conn, "host");
                 match net::make_offer(&conn).await {
                     Ok((ch, sdp)) => {
-                        watch(ch, chan);
+                        watch(ch, chan, "host");
                         ta.set_value(&sdp);
                         ta.select();
                         *pc.borrow_mut() = Some(conn);
                         role.set(Role::Host);
+                        net::log(&format!(
+                            "[host] candidates: {}",
+                            net::candidate_summary(&sdp)
+                        ));
                         net::note(&format!(
                             "offer ready ({} bytes) — send it over, paste the reply here",
                             sdp.len()
@@ -83,8 +88,10 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
         let cb = Closure::<dyn FnMut()>::new(move || {
             let (pc, chan, ta, role) = (pc.clone(), chan.clone(), ta.clone(), role.clone());
             spawn_local(async move {
-                let pasted = ta.value().trim().to_string();
-                if pasted.is_empty() {
+                // Not trimmed here — net::normalize_sdp owns that, and doing it
+                // in two places is how the terminator got eaten the first time.
+                let pasted = ta.value();
+                if pasted.trim().is_empty() {
                     return net::note("nothing pasted");
                 }
                 match role.get() {
@@ -106,16 +113,22 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
                             Ok(c) => c,
                             Err(e) => return net::note(&format!("connection failed: {e:?}")),
                         };
+                        net::trace_states(&conn, "join");
+                        net::log(&format!(
+                            "[join] their candidates: {}",
+                            net::candidate_summary(&pasted)
+                        ));
                         // Installed before the answer is created — the channel
                         // can arrive the moment the connection completes.
                         let incoming = net::on_data_channel(&conn);
                         {
                             let chan = chan.clone();
                             spawn_local(async move {
+                                net::log("[join] waiting for ondatachannel");
                                 if let Ok(Ok(ch)) =
                                     incoming.await.map(|v| v.dyn_into::<RtcDataChannel>())
                                 {
-                                    watch(ch, chan);
+                                    watch(ch, chan, "join");
                                 }
                             });
                         }
@@ -124,6 +137,10 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
                                 ta.set_value(&answer);
                                 ta.select();
                                 *pc.borrow_mut() = Some(conn);
+                                net::log(&format!(
+                                    "[join] candidates: {}",
+                                    net::candidate_summary(&answer)
+                                ));
                                 net::note(&format!(
                                     "answer ready ({} bytes) — send it back",
                                     answer.len()
@@ -144,13 +161,14 @@ pub fn wire(doc: &Document) -> Result<Link, JsValue> {
 
 /// Stores the channel and reports when it opens. Both sides end up here — the
 /// host from `create_data_channel`, the joiner from `ondatachannel`.
-fn watch(ch: RtcDataChannel, slot: Rc<RefCell<Option<RtcDataChannel>>>) {
+fn watch(ch: RtcDataChannel, slot: Rc<RefCell<Option<RtcDataChannel>>>, tag: &'static str) {
+    net::log(&format!("[{tag}] channel {:?}", ch.ready_state()));
     let opened = net::on_open(&ch);
     *slot.borrow_mut() = Some(ch);
     spawn_local(async move {
         match opened.await {
-            Ok(_) => net::note("CONNECTED"),
-            Err(e) => net::note(&format!("channel failed: {e:?}")),
+            Ok(_) => net::note(&format!("CONNECTED ({tag})")),
+            Err(e) => net::note(&format!("[{tag}] channel failed: {e:?}")),
         }
     });
 }

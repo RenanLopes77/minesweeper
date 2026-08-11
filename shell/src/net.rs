@@ -65,6 +65,25 @@ async fn wait_for_ice(pc: &RtcPeerConnection) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Repairs an SDP that has been through a human.
+///
+/// Copy/paste mangles line endings, and any `trim()` on the way in removes the
+/// terminator from the final line — which makes a perfectly valid last line
+/// ("a=max-message-size:262144", usually) parse as garbage:
+///
+/// ```text
+/// OperationError: Failed to parse SessionDescription.
+/// a=max-message-size:262144 Invalid SDP line.
+/// ```
+///
+/// So: strip surrounding whitespace, normalise CRLF and lone CR to LF, and put
+/// exactly one newline back on the end.
+pub fn normalize_sdp(s: &str) -> String {
+    let mut out = s.trim().replace("\r\n", "\n").replace('\r', "\n");
+    out.push('\n');
+    out
+}
+
 fn sdp_of(desc: &JsValue) -> Result<String, JsValue> {
     Reflect::get(desc, &JsValue::from_str("sdp"))?
         .as_string()
@@ -97,7 +116,7 @@ pub async fn make_offer(pc: &RtcPeerConnection) -> Result<(RtcDataChannel, Strin
 /// The DataChannel arrives asynchronously via `ondatachannel`, not from here.
 pub async fn accept_offer(pc: &RtcPeerConnection, offer_sdp: &str) -> Result<String, JsValue> {
     let offer = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-    offer.set_sdp(offer_sdp);
+    offer.set_sdp(&normalize_sdp(offer_sdp));
     JsFuture::from(pc.set_remote_description(&offer)).await?;
 
     let answer = JsFuture::from(pc.create_answer()).await?;
@@ -115,7 +134,7 @@ pub async fn accept_offer(pc: &RtcPeerConnection, offer_sdp: &str) -> Result<Str
 /// Caller side, final step: feed the answer back in and the channel opens.
 pub async fn accept_answer(pc: &RtcPeerConnection, answer_sdp: &str) -> Result<(), JsValue> {
     let answer = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-    answer.set_sdp(answer_sdp);
+    answer.set_sdp(&normalize_sdp(answer_sdp));
     JsFuture::from(pc.set_remote_description(&answer)).await?;
     Ok(())
 }
@@ -178,9 +197,57 @@ fn on_message(ch: &RtcDataChannel) -> JsFuture {
     }))
 }
 
+/// Appends a line to #log and the browser console. WebRTC failures are silent
+/// and asynchronous — without a running transcript there is nothing to read.
+pub fn log(msg: &str) {
+    web_sys::console::log_1(&JsValue::from_str(msg));
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("log"))
+    {
+        let prev = el.text_content().unwrap_or_default();
+        el.set_text_content(Some(&format!("{prev}{msg}\n")));
+    }
+}
+
+/// How many candidates of each kind an SDP carries.
+///
+/// `host` = your LAN address. `srflx` = your public address, learned from
+/// STUN — zero of these means STUN never answered. `relay` = a TURN server,
+/// which we do not run, so it is always zero here.
+pub fn candidate_summary(sdp: &str) -> String {
+    format!(
+        "{} host / {} srflx / {} relay",
+        sdp.matches("typ host").count(),
+        sdp.matches("typ srflx").count(),
+        sdp.matches("typ relay").count(),
+    )
+}
+
+/// Traces the two state machines that decide whether a connection happens.
+/// `connectionState` is the overall verdict; `iceConnectionState` is the
+/// transport underneath it. A handshake that accepts an answer and then goes
+/// quiet is stuck in one of these.
+pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str) {
+    let p = pc.clone();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        log(&format!("[{tag}] connection: {:?}", p.connection_state()));
+    });
+    pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
+    cb.forget();
+
+    let p = pc.clone();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        log(&format!("[{tag}] ice: {:?}", p.ice_connection_state()));
+    });
+    pc.set_oniceconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
+    cb.forget();
+}
+
 /// Writes progress into #status. When a WebRTC handshake stalls it stalls
 /// silently, so knowing which await never returned is most of the diagnosis.
 pub fn note(stage: &str) {
+    log(stage);
     if let Some(el) = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("status"))

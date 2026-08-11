@@ -25,6 +25,11 @@
       background: #2b3038; border: 1px solid #3a424e;
     }
     button:hover { background: #353c46; }
+    #log {
+      font: 10px/1.5 ui-monospace, monospace; color: #7a8494;
+      background: #12161d; border: 1px solid #2a323e; padding: .5rem;
+      max-height: 11rem; overflow: auto; margin: 0; white-space: pre-wrap;
+    }
     textarea {
       font: 11px/1.4 ui-monospace, monospace;
       color: #b6bcc6; background: #12161d;
@@ -44,6 +49,7 @@
     </div>
     <textarea id="sig" rows="4" spellcheck="false"
       placeholder="Host: press Host, copy this, paste the reply back here.&#10;Join: paste their offer, press Accept, send the reply back."></textarea>
+    <pre id="log"></pre>
   </section>
 </body>
 </html>
