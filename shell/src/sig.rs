@@ -69,6 +69,29 @@ fn sdp_from_input(s: &str) -> Option<String> {
     String::from_utf8(b64::decode(payload)?).ok()
 }
 
+/// Draws the link as a QR code, or hides the canvas if it cannot be drawn.
+/// Failure here is cosmetic — the link itself still works — so it is logged
+/// rather than surfaced as an error.
+fn show_qr(link: &str) {
+    let Some(canvas) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("qr"))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+    else {
+        return;
+    };
+    match crate::qr::render(&canvas, link) {
+        Ok(modules) => {
+            net::log(&format!("qr: {modules}x{modules} modules"));
+            let _ = canvas
+                .unchecked_ref::<web_sys::HtmlElement>()
+                .style()
+                .set_property("display", "block");
+        }
+        Err(e) => net::log(&format!("qr skipped: {e:?}")),
+    }
+}
+
 /// The offer carried in our own address bar, if we were opened from a link.
 fn offer_from_url() -> Option<String> {
     let hash = web_sys::window()?.location().hash().ok()?;
@@ -152,6 +175,7 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
             let link = make_link('o', &sdp);
             ta.set_value(&link);
             ta.select();
+            show_qr(&link);
             *pc.borrow_mut() = Some(conn);
             role.set(Role::Host);
             net::log(&format!(
@@ -196,6 +220,7 @@ async fn join_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, offer: Str
             let link = make_link('a', &answer);
             ta.set_value(&link);
             ta.select();
+            show_qr(&link);
             *pc.borrow_mut() = Some(conn);
             net::log(&format!(
                 "[join] candidates: {}",

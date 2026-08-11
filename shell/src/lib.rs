@@ -1,6 +1,7 @@
 mod app;
 mod b64;
 mod net;
+mod qr;
 mod sig;
 
 use std::cell::RefCell;

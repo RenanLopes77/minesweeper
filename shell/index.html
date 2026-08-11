@@ -25,6 +25,7 @@
       background: #2b3038; border: 1px solid #3a424e;
     }
     button:hover { background: #353c46; }
+    #qr { display: none; width: min(80vw, 22rem); height: auto; image-rendering: pixelated; justify-self: center; background: #fff; padding: 0; }
     #log {
       font: 10px/1.5 ui-monospace, monospace; color: #7a8494;
       background: #12161d; border: 1px solid #2a323e; padding: .5rem;
@@ -50,6 +51,7 @@
     </div>
     <textarea id="sig" rows="2" spellcheck="false"
       placeholder="Press Host to get a link. Or paste a link here and press Accept."></textarea>
+    <canvas id="qr" width="0" height="0"></canvas>
     <pre id="log"></pre>
   </section>
 </body>
