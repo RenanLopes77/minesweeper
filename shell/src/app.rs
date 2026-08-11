@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use engine::{Board, Event, Game, Msg, Reveal, Status, decode_msg, encode_msg};
+use engine::{Board, Event, Game, Msg, Reveal, Stamped, Status, decode_msg, encode_msg};
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
 use crate::net;
@@ -35,10 +35,10 @@ pub struct Presence {
     pub last: [Option<(u8, u8)>; 2],
 }
 
-pub fn presence(log: &[Event]) -> Presence {
+pub fn presence(log: &[Stamped]) -> Presence {
     let mut p = Presence::default();
-    for ev in log {
-        match *ev {
+    for s in log {
+        match s.ev {
             // A new board wipes what came before it.
             Event::Start { .. } => p = Presence::default(),
             Event::Reveal { player, x, y } | Event::Flag { player, x, y } => {
@@ -57,9 +57,28 @@ const DIGITS: [&str; 9] = [
     "", "#2b52c8", "#2e7d32", "#c0392b", "#1f3070", "#8c3b2e", "#17727a", "#2b3038", "#6d7684",
 ];
 
+/// Folds a peer's events into ours and returns whether anything was new.
+///
+/// The log is kept sorted by `Stamped`'s own order, which both peers agree on,
+/// so it does not matter who heard what first. Re-delivery of an event we
+/// already have is a no-op rather than a second move.
+pub fn merge(log: &mut Vec<Stamped>, incoming: &[Stamped]) -> bool {
+    let mut changed = false;
+    for &s in incoming {
+        if let Err(i) = log.binary_search(&s) {
+            log.insert(i, s);
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub struct App {
     pub game: Game,
-    pub log: Vec<Event>,
+    pub log: Vec<Stamped>,
+    /// Lamport clock: one past the highest `seq` we have seen from anyone, so
+    /// a move we make now sorts after everything we knew about when we made it.
+    clock: u32,
     /// 0 for the host, 1 for the joiner. Unused by the rules; it rides along
     /// in every event so a later chapter can attribute moves.
     pub player: u8,
@@ -92,7 +111,11 @@ impl App {
         let (w, h, mines) = LEVELS[0];
         App {
             game: Game::new(seed, w, h, mines),
-            log: vec![Event::Start { seed, w, h, mines }],
+            log: vec![Stamped {
+                seq: 0,
+                ev: Event::Start { seed, w, h, mines },
+            }],
+            clock: 0,
             player: 0,
             flag_mode: false,
             chan: None,
@@ -113,11 +136,28 @@ impl App {
         }
     }
 
+    /// Folds the whole log again. A remote event can land anywhere in the
+    /// order, including before moves we have already applied, so the board is
+    /// rebuilt rather than patched.
+    ///
+    /// ponytail: O(log) per remote message. A few hundred events on a 30x16
+    /// board is microseconds; if logs ever get long, keep a snapshot and
+    /// replay only the tail.
+    fn rebuild(&mut self) {
+        let events: Vec<Event> = self.log.iter().map(|s| s.ev).collect();
+        if let Some(g) = Game::replay(&events) {
+            self.game = g;
+        }
+    }
+
     /// Everything that has to happen after the board changes: run the clock,
     /// repaint, update the two numbers above the board.
     fn refresh(&mut self) {
         let playing = self.game.status() == Status::Playing;
-        let opened = self.log.iter().any(|e| matches!(e, Event::Reveal { .. }));
+        let opened = self
+            .log
+            .iter()
+            .any(|s| matches!(s.ev, Event::Reveal { .. }));
         if !opened {
             // A fresh board, from New game or from adopting the host's log.
             self.start_ms = None;
@@ -172,9 +212,13 @@ impl App {
 /// A move made on this device.
 pub fn local(app: &Shared, ev: Event) {
     let mut a = app.borrow_mut();
-    a.log.push(ev);
+    a.clock += 1;
+    let s = Stamped { seq: a.clock, ev };
+    // Our clock is at least as high as anything we have heard, so this sorts
+    // last and the append is already in order.
+    a.log.push(s);
     a.game.apply(&ev);
-    a.send(&Msg::Events(vec![ev]));
+    a.send(&Msg::Events(vec![s]));
     a.send_state();
     a.refresh();
 }
@@ -199,18 +243,22 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
             // A message that opens with Start is a whole log, not a move: the
             // host sends one when the channel opens so the joiner adopts its
             // seed. Start can only ever mean "here is the game".
-            if matches!(events.first(), Some(Event::Start { .. })) {
-                if let Some(g) = Game::replay(&events) {
-                    net::log(&format!("adopted host log, {} events", events.len()));
-                    a.game = g;
-                    a.log = events;
-                }
+            if matches!(
+                events.first(),
+                Some(Stamped {
+                    ev: Event::Start { .. },
+                    ..
+                })
+            ) {
+                net::log(&format!("adopted host log, {} events", events.len()));
+                a.log = events;
             } else {
-                for ev in &events {
-                    a.game.apply(ev);
-                    a.log.push(*ev);
-                }
+                merge(&mut a.log, &events);
             }
+            // Our clock must outrun anything we have now seen, or our next
+            // move would sort before a move that has already happened.
+            a.clock = a.clock.max(a.log.last().map_or(0, |s| s.seq));
+            a.rebuild();
             a.refresh();
             // Answer with where that left us, so they can check too.
             a.send_state();
@@ -351,31 +399,51 @@ mod tests {
         assert_eq!(mines_left(&g.board), -1);
     }
 
-    #[test]
-    fn presence_attributes_cells_and_remembers_each_last_move() {
-        let log = [
+    fn stamp(seq: u32, ev: Event) -> Stamped {
+        Stamped { seq, ev }
+    }
+
+    fn start(seed: u64) -> Stamped {
+        stamp(
+            0,
             Event::Start {
-                seed: 1,
+                seed,
                 w: 9,
                 h: 9,
                 mines: 10,
             },
-            Event::Flag {
-                player: 0,
-                x: 1,
-                y: 1,
-            },
-            Event::Flag {
-                player: 1,
-                x: 2,
-                y: 2,
-            },
+        )
+    }
+
+    #[test]
+    fn presence_attributes_cells_and_remembers_each_last_move() {
+        let log = [
+            start(1),
+            stamp(
+                1,
+                Event::Flag {
+                    player: 0,
+                    x: 1,
+                    y: 1,
+                },
+            ),
+            stamp(
+                2,
+                Event::Flag {
+                    player: 1,
+                    x: 2,
+                    y: 2,
+                },
+            ),
             // Player 1 takes over a cell player 0 had.
-            Event::Reveal {
-                player: 1,
-                x: 1,
-                y: 1,
-            },
+            stamp(
+                3,
+                Event::Reveal {
+                    player: 1,
+                    x: 1,
+                    y: 1,
+                },
+            ),
         ];
         let p = presence(&log);
         assert_eq!(p.owner.get(&(1, 1)), Some(&1));
@@ -383,16 +451,65 @@ mod tests {
         assert_eq!(p.last, [Some((1, 1)), Some((1, 1))]);
 
         // A restart mid-log wipes everything before it.
-        let restarted = presence(&[
-            log[1],
-            Event::Start {
-                seed: 2,
-                w: 9,
-                h: 9,
-                mines: 10,
-            },
-        ]);
+        let restarted = presence(&[log[1], start(2)]);
         assert!(restarted.owner.is_empty());
         assert_eq!(restarted.last, [None, None]);
+    }
+
+    /// The point of the whole stamping exercise: two peers who each make a
+    /// move before hearing the other's end up with the same board. This is
+    /// hazard 1 from the README — the opening move, which used to give the
+    /// two of them different mine layouts.
+    #[test]
+    fn peers_converge_whatever_order_the_moves_arrive_in() {
+        let seed = 0x5EED;
+        let mine = stamp(
+            1,
+            Event::Reveal {
+                player: 0,
+                x: 0,
+                y: 0,
+            },
+        );
+        let theirs = stamp(
+            1,
+            Event::Reveal {
+                player: 1,
+                x: 8,
+                y: 8,
+            },
+        );
+
+        // Us: our move, then theirs arrives. Them: the mirror image.
+        let mut ours = vec![start(seed), mine];
+        merge(&mut ours, &[theirs]);
+        let mut peer = vec![start(seed), theirs];
+        merge(&mut peer, &[mine]);
+
+        assert_eq!(ours, peer, "the logs must be the same sequence");
+        let fold = |log: &[Stamped]| {
+            Game::replay(&log.iter().map(|s| s.ev).collect::<Vec<_>>())
+                .unwrap()
+                .hash()
+        };
+        assert_eq!(fold(&ours), fold(&peer));
+    }
+
+    #[test]
+    fn merge_ignores_events_it_already_has() {
+        let mut log = vec![
+            start(1),
+            stamp(
+                1,
+                Event::Flag {
+                    player: 0,
+                    x: 3,
+                    y: 3,
+                },
+            ),
+        ];
+        let again = log.clone();
+        assert!(!merge(&mut log, &again), "nothing was new");
+        assert_eq!(log.len(), 2, "a redelivered flag must not toggle twice");
     }
 }

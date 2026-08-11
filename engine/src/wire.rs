@@ -13,11 +13,17 @@
 //! Flag    0x02  player(1)  x(1)  y(1)           =  4 bytes
 //! ```
 //!
+//! A log is a sequence of *stamped* events — each of the above prefixed with
+//! `seq(4)`, the Lamport clock that puts the two peers' moves in one agreed
+//! order. That prefix is version 2 of this format; a version 1 peer reading
+//! it would see a seq where it expects a tag and reject the message, which is
+//! the right failure.
+//!
 //! Every decode path is a trust boundary — the bytes arrive from a peer, and
 //! a peer can be buggy, outdated, or hostile. Nothing here panics or indexes
 //! unchecked; malformed input returns `None` and the caller drops the message.
 
-use crate::Event;
+use crate::{Event, Stamped};
 
 const TAG_START: u8 = 0;
 const TAG_REVEAL: u8 = 1;
@@ -25,6 +31,8 @@ const TAG_FLAG: u8 = 2;
 
 const START_LEN: usize = 13;
 const MOVE_LEN: usize = 4;
+/// The `seq` prefix on every record in a log.
+const SEQ_LEN: usize = 4;
 
 impl Event {
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -71,6 +79,19 @@ impl Event {
     }
 }
 
+impl Stamped {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        self.ev.encode(out);
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<(Stamped, usize)> {
+        let seq = u32::from_le_bytes(bytes.get(..SEQ_LEN)?.try_into().ok()?);
+        let (ev, n) = Event::decode(&bytes[SEQ_LEN..])?;
+        Some((Stamped { seq, ev }, SEQ_LEN + n))
+    }
+}
+
 /// What one DataChannel message can be.
 ///
 /// The event stream alone cannot carry a checksum, so messages get a one-byte
@@ -78,7 +99,7 @@ impl Event {
 /// looks like now".
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Msg {
-    Events(Vec<Event>),
+    Events(Vec<Stamped>),
     /// The sender's board hash after applying `count` events. Compared only
     /// when the receiver is also at `count` — different counts just mean one
     /// side is behind, which is normal and not a desync.
@@ -121,8 +142,8 @@ pub fn decode_msg(bytes: &[u8]) -> Option<Msg> {
     }
 }
 
-pub fn encode_log(events: &[Event]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(events.len() * MOVE_LEN);
+pub fn encode_log(events: &[Stamped]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(events.len() * (SEQ_LEN + MOVE_LEN));
     for ev in events {
         ev.encode(&mut out);
     }
@@ -132,11 +153,11 @@ pub fn encode_log(events: &[Event]) -> Vec<u8> {
 /// Decodes a whole log. Leftover or truncated bytes are a failure, not a
 /// partial success — accepting half a log would desync the peers silently,
 /// which is exactly the failure mode this format exists to prevent.
-pub fn decode_log(bytes: &[u8]) -> Option<Vec<Event>> {
+pub fn decode_log(bytes: &[u8]) -> Option<Vec<Stamped>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        let (ev, n) = Event::decode(&bytes[i..])?;
+        let (ev, n) = Stamped::decode(&bytes[i..])?;
         out.push(ev);
         i += n;
     }
@@ -147,6 +168,10 @@ pub fn decode_log(bytes: &[u8]) -> Option<Vec<Event>> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn stamp(seq: u32, ev: Event) -> Stamped {
+        Stamped { seq, ev }
+    }
 
     /// If this test fails, you changed the wire format. That is allowed, but
     /// it means old peers can no longer talk to new ones — do it deliberately.
@@ -214,31 +239,105 @@ mod tests {
 
     #[test]
     fn a_log_ending_mid_frame_is_rejected() {
+        let start = SEQ_LEN + START_LEN;
         let full = encode_log(&[
-            Event::Start {
-                seed: 7,
-                w: 9,
-                h: 9,
-                mines: 10,
-            },
-            Event::Reveal {
-                player: 0,
-                x: 1,
-                y: 2,
-            },
+            stamp(
+                0,
+                Event::Start {
+                    seed: 7,
+                    w: 9,
+                    h: 9,
+                    mines: 10,
+                },
+            ),
+            stamp(
+                1,
+                Event::Reveal {
+                    player: 0,
+                    x: 1,
+                    y: 2,
+                },
+            ),
         ]);
-        assert_eq!(full.len(), START_LEN + MOVE_LEN);
+        assert_eq!(full.len(), start + SEQ_LEN + MOVE_LEN);
         // Cutting inside the second event: the first still decodes, the log
         // as a whole must not.
-        for cut in START_LEN + 1..full.len() {
+        for cut in start + 1..full.len() {
             assert!(
                 decode_log(&full[..cut]).is_none(),
                 "accepted a log truncated to {cut} bytes"
             );
         }
         // ...but cutting exactly on the boundary is a valid one-event log.
-        assert_eq!(decode_log(&full[..START_LEN]).map(|v| v.len()), Some(1));
+        assert_eq!(decode_log(&full[..start]).map(|v| v.len()), Some(1));
         assert_eq!(decode_log(&full).map(|v| v.len()), Some(2));
+    }
+
+    /// The stamp is what the peers sort by, so its bytes are frozen too.
+    #[test]
+    fn stamp_layout_is_frozen() {
+        let mut v = Vec::new();
+        stamp(
+            0x0A0B_0C0D,
+            Event::Reveal {
+                player: 1,
+                x: 2,
+                y: 3,
+            },
+        )
+        .encode(&mut v);
+        assert_eq!(v, [0x0D, 0x0C, 0x0B, 0x0A, 1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_partial_stamp_is_rejected() {
+        let mut v = Vec::new();
+        stamp(
+            9,
+            Event::Flag {
+                player: 0,
+                x: 1,
+                y: 2,
+            },
+        )
+        .encode(&mut v);
+        for cut in 0..v.len() {
+            assert!(Stamped::decode(&v[..cut]).is_none(), "accepted {cut} bytes");
+        }
+    }
+
+    /// Sorting is the whole point: the order must not depend on which peer is
+    /// doing the sorting, so equal `seq` still gives one deterministic answer.
+    #[test]
+    fn equal_seq_still_totally_orders() {
+        let a = stamp(
+            5,
+            Event::Reveal {
+                player: 0,
+                x: 1,
+                y: 1,
+            },
+        );
+        let b = stamp(
+            5,
+            Event::Reveal {
+                player: 1,
+                x: 1,
+                y: 1,
+            },
+        );
+        assert!(a < b, "player breaks the tie");
+        assert!(
+            stamp(
+                4,
+                Event::Flag {
+                    player: 9,
+                    x: 0,
+                    y: 0
+                }
+            ) < a,
+            "seq outranks everything in the event"
+        );
     }
 
     #[test]
@@ -248,11 +347,14 @@ mod tests {
 
     #[test]
     fn trailing_garbage_is_rejected() {
-        let mut v = encode_log(&[Event::Reveal {
-            player: 0,
-            x: 1,
-            y: 2,
-        }]);
+        let mut v = encode_log(&[stamp(
+            1,
+            Event::Reveal {
+                player: 0,
+                x: 1,
+                y: 2,
+            },
+        )]);
         v.push(TAG_START); // a valid tag, but nothing behind it
         assert!(decode_log(&v).is_none());
     }
@@ -290,6 +392,10 @@ mod tests {
         assert_eq!(decode_log(&encode_log(&[])), Some(vec![]));
     }
 
+    fn any_stamped() -> impl Strategy<Value = Stamped> {
+        (any::<u32>(), any_event()).prop_map(|(seq, ev)| Stamped { seq, ev })
+    }
+
     fn any_event() -> impl Strategy<Value = Event> {
         prop_oneof![
             (any::<u64>(), any::<u8>(), any::<u8>(), any::<u16>())
@@ -318,8 +424,25 @@ mod tests {
         }
 
         #[test]
-        fn logs_round_trip(evs in prop::collection::vec(any_event(), 0..64)) {
+        fn logs_round_trip(evs in prop::collection::vec(any_stamped(), 0..64)) {
             prop_assert_eq!(decode_log(&encode_log(&evs)), Some(evs));
+        }
+
+        /// Whatever order two peers hear about events in, sorting lands them
+        /// in the same one. This is the property the merge in the shell leans
+        /// on, so it is checked here rather than assumed.
+        #[test]
+        fn sorting_is_order_independent(
+            evs in prop::collection::vec(any_stamped(), 0..32),
+            cut in 0usize..32,
+        ) {
+            let cut = cut.min(evs.len());
+            let (a, b) = evs.split_at(cut);
+            let mut theirs: Vec<Stamped> = b.iter().chain(a).copied().collect();
+            let mut ours = evs.clone();
+            ours.sort();
+            theirs.sort();
+            prop_assert_eq!(ours, theirs);
         }
 
         /// The trust-boundary test: arbitrary bytes must never panic, only
@@ -331,7 +454,7 @@ mod tests {
         }
 
         #[test]
-        fn event_messages_round_trip(evs in prop::collection::vec(any_event(), 0..64)) {
+        fn event_messages_round_trip(evs in prop::collection::vec(any_stamped(), 0..64)) {
             let m = Msg::Events(evs);
             prop_assert_eq!(decode_msg(&encode_msg(&m)), Some(m));
         }

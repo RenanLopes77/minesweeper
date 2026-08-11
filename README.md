@@ -29,6 +29,11 @@ The event log is the source of truth; board state is derived by folding
 identical boards without exchanging them. `Game::hash()` reduces the whole
 board to a `u64` for divergence detection.
 
+Each event travels `Stamped` with a Lamport `seq`. Both peers keep the log
+sorted by `(seq, event)` and refold the board from it, so the two of them agree
+on one order no matter who heard what first — the hash is now a check on that
+agreement rather than the only thing standing between you and a silent split.
+
 ## Develop
 
     cargo test --workspace       # engine tests, native, fast
@@ -80,13 +85,16 @@ symmetric-NAT cases — and will simply fail to connect.
   the log at draw time — no extra state to drift, no cursor streaming over the
   channel.
 
-- **Phase 4** — harden the sync. Deferred until the game is worth playing;
-  the failures it addresses are real but rare, and now reported rather than
-  silent.
-  - Total-order events by `(seq, player)` so the three ordering hazards
-    below cannot fire.
+- **Phase 4** — harden the sync.
+  - Total order. **Done.** Every event is `Stamped` with a Lamport `seq`, and
+    the log is kept sorted by `(seq, event)` — the event itself breaks ties,
+    so two peers moving at the same instant still agree. Arriving events are
+    merged into place and the board is refolded from the whole log, which is
+    why order of arrival no longer matters. The three hazards that used to
+    diverge — the opening move, reveal-versus-flag on one cell, and a losing
+    move — cannot fire now that both sides fold the same sequence.
   - Reconnect: channel drops, re-signal, compare log lengths, ship the
-    missing tail.
+    missing tail. *Next.*
 
 - **Phase 5** — a wgpu renderer, *if it ever earns its place.* Parked, and
   possibly permanently.
@@ -107,24 +115,6 @@ symmetric-NAT cases — and will simply fail to connect.
   pass. That was worth designing for even if it is never used.
 
 ## Known gaps
-
-**Three ordering hazards.** Each peer applies its own move before hearing the
-other's, so the two logs are permutations. That is usually harmless — reveals
-commute once the board exists, and flags always commute — but three cases
-genuinely diverge. All three have tests in `engine/src/game.rs` asserting the
-divergence, so they are documented rather than assumed away:
-
-1. *The opening move.* Mines are placed on the first `Reveal`, seeded from
-   that cell. Two peers who each open a cell before hearing from the other are
-   playing different boards, not merely disagreeing about one square.
-2. *Reveal and flag on the same cell.* Reveal-then-flag opens it and ignores
-   the flag; flag-then-reveal leaves it flagged and opens nothing, because
-   `reveal` skips anything that is not `Hidden`.
-3. *A losing move.* `apply` ignores everything once the game is over, so a
-   mine hit first silences what came after it, and a mine hit last does not.
-
-The peers exchange a board hash after every move and report `DESYNC` when they
-differ, so these are visible when they happen. Preventing them is phase 4.
 
 **No reconnect.** A dropped channel ends the session.
 
