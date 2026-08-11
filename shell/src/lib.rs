@@ -1,3 +1,5 @@
+mod net;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -18,10 +20,36 @@ const DIGITS: [&str; 9] = [
 
 #[wasm_bindgen(start)]
 pub fn main() -> Result<(), JsValue> {
-    let doc = web_sys::window()
-        .ok_or("no window")?
-        .document()
-        .ok_or("no document")?;
+    let win = web_sys::window().ok_or("no window")?;
+    let doc = win.document().ok_or("no document")?;
+
+    // ?selftest runs the WebRTC loopback instead of the game. Not a unit test
+    // — running it needs a real browser, and a real browser is the thing under
+    // test. Result goes in #status so it can be scraped headlessly.
+    if win
+        .location()
+        .search()
+        .unwrap_or_default()
+        .contains("selftest")
+    {
+        if let Some(el) = doc.get_element_by_id("status") {
+            el.set_text_content(Some("RUNNING"));
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            let msg = match net::loopback_selftest().await {
+                Ok(s) => s,
+                Err(e) => format!("FAIL — {e:?}"),
+            };
+            if let Some(el) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id("status"))
+            {
+                el.set_text_content(Some(&msg));
+            }
+        });
+        return Ok(());
+    }
+
     let canvas: web_sys::HtmlCanvasElement = doc
         .get_element_by_id("board")
         .ok_or("no #board canvas")?
