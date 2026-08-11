@@ -99,7 +99,16 @@ fn show_qr(link: &str) {
 fn copy(ta: &HtmlTextAreaElement) {
     ta.select();
     if let Some(win) = web_sys::window() {
-        let _ = win.navigator().clipboard().write_text(&ta.value());
+        let p = win.navigator().clipboard().write_text(&ta.value());
+        // The browser refuses a clipboard write from a tab that is not
+        // focused — which is exactly a joiner answering in a background tab.
+        // The link is in the box either way, so this is a note, not a crash;
+        // left unhandled it is an uncaught rejection in the console.
+        let refused = Closure::<dyn FnMut(JsValue)>::new(|_: JsValue| {
+            net::log("clipboard refused — the link is in the box, copy it by hand");
+        });
+        let _ = p.catch(&refused);
+        refused.forget();
     }
 }
 

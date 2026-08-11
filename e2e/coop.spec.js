@@ -104,6 +104,29 @@ test('losing the peer restores the handshake and keeps the board', async ({ brow
   await a.close();
 });
 
+/// A New game is a move, not a game being handed over. If a peer mistakes it
+/// for one it replaces its whole log, the two counts drift apart forever, and
+/// `Msg::State` stops comparing hashes — desync detection off, silently.
+test('a restart keeps both logs the same length', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  await clickCell(a, 4, 4);
+  await expect.poll(() => logLen(b)).toBe(2);
+
+  await a.locator('#level').selectOption({ index: 1 }); // Intermediate
+  await a.locator('#restart').click();
+
+  await expect.poll(() => logLen(a)).toBe(3);
+  await expect.poll(() => logLen(b)).toBe(3);
+  expect(await hash(a)).toBe(await hash(b));
+  await expect(b.locator('#hud')).toContainText('40 flags left');
+
+  await a.close();
+  await b.close();
+});
+
 /// Pasting a link into the address bar of a tab that already has the game open
 /// is a fragment-only navigation: the page never reloads, so the offer has to
 /// be picked up from `hashchange` rather than from startup.

@@ -276,10 +276,17 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
 
     match msg {
         Msg::Events(events) => {
-            // A log that opens with a *different* Start is a different game,
-            // not moves to fold in: the host's, on a fresh join. The joiner
-            // takes it; the host never abandons its own game for a peer's.
-            let other_game = matches!(events.first(), Some(s) if matches!(s.ev, Event::Start { .. })
+            // A whole log opens with the *first* event of a game: a Start at
+            // seq 0. That is someone handing over their game on connect — the
+            // joiner takes it, the host never abandons its own for a peer's.
+            //
+            // A restart is also a Start, but it is a move, so its seq is at
+            // least 1. Telling the two apart is what keeps the logs the same
+            // length after a New game — and `Msg::State` only compares hashes
+            // when the counts agree, so getting this wrong turns off desync
+            // detection for the rest of the session.
+            let other_game = matches!(events.first(), Some(s) if s.seq == 0
+                && matches!(s.ev, Event::Start { .. })
                 && Some(s) != a.log.first());
             if other_game {
                 if a.player != 0 {
@@ -618,6 +625,46 @@ mod tests {
         },
         at_ms: 0,
     };
+
+    /// A restart is a move, not a new game being handed over. Merging it is
+    /// what keeps both logs the same length — and the length is what decides
+    /// whether the two hashes are compared at all.
+    #[test]
+    fn a_restart_is_a_move_not_a_whole_log() {
+        let handshake = start(1); // seq 0: the opening of somebody's game
+        let restart = at(
+            4,
+            Event::Start {
+                seed: 99,
+                w: 16,
+                h: 16,
+                mines: 40,
+            },
+            5_000,
+        );
+        let is_whole_log =
+            |s: &Stamped| s.seq == 0 && matches!(s.ev, Event::Start { .. }) && *s != handshake;
+        assert!(!is_whole_log(&handshake), "our own game is not foreign");
+        assert!(!is_whole_log(&restart), "a restart is a move");
+
+        // And merging it leaves both sides holding the same number of events.
+        let mut ours = vec![
+            handshake,
+            stamp(
+                1,
+                Event::Reveal {
+                    player: 0,
+                    x: 1,
+                    y: 1,
+                },
+            ),
+        ];
+        let mut theirs = ours.clone();
+        merge(&mut ours, &[restart]);
+        merge(&mut theirs, &[restart]);
+        assert_eq!(ours.len(), 3);
+        assert_eq!(ours, theirs);
+    }
 
     #[test]
     fn merge_ignores_events_it_already_has() {
