@@ -54,9 +54,26 @@ virtual workspace with no root package.
 
 ## Signalling
 
-The SDP travels in the URL **fragment** (`#o=` offer, `#a=` answer), base64url
-encoded. Fragments are never sent to the server, so the handshake stays between
-the two peers even though the page is hosted on GitHub Pages.
+The SDP travels in the URL **fragment** (`#o=` offer, `#a=` answer), deflated
+and then base64url encoded. Fragments are never sent to the server, so the
+handshake stays between the two peers even though the page is hosted on GitHub
+Pages.
+
+Deflate is worth it because the link is carried by a human: an SDP is
+repetitive ASCII, so `CompressionStream('deflate-raw')` — a browser feature,
+not a dependency — takes an offer from 994 bytes to 568, the link from 1372
+characters to 783, and the QR code from 141 modules square to 109. Anything
+that cannot be compressed is sent plain, and a link from an older peer that
+was never compressed still decodes.
+
+**Two links is not a choice.** The peer answering has to send back its DTLS
+fingerprint, its ICE credentials and at least one candidate; none of the three
+can be guessed in advance, and browsers reject an SDP whose fingerprint or
+credentials have been rewritten. Libraries that manage one round trip —
+[wasm-peers](https://github.com/wasm-peers/wasm-peers),
+[matchbox](https://github.com/johanhelsing/matchbox) — all do it by running a
+signalling server that both peers can reach. That is the trade: a server, or a
+second link.
 
 A public STUN server is the one piece of infrastructure this cannot avoid:
 peers behind NAT need it to learn their own public address. It sees an IP and
