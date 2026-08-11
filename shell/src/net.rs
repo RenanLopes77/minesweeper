@@ -230,6 +230,11 @@ pub fn candidate_summary(sdp: &str) -> String {
 /// `connectionState` is the overall verdict; `iceConnectionState` is the
 /// transport underneath it. A handshake that accepts an answer and then goes
 /// quiet is stuck in one of these.
+/// How long `disconnected` is allowed to last before it counts as gone. ICE
+/// reports it on a blip — a phone changing cells, a laptop switching AP — and
+/// recovers on its own most of the time.
+const GRACE_MS: i32 = 5_000;
+
 /// `on_drop` fires when the connection stops being usable. A channel's own
 /// `onclose` covers a polite hangup; this covers the network vanishing, where
 /// the state machine notices and the channel may not.
@@ -238,13 +243,31 @@ pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str, on_drop: Rc<dyn F
     let cb = Closure::<dyn FnMut()>::new(move || {
         let state = p.connection_state();
         log(&format!("[{tag}] connection: {state:?}"));
-        if matches!(
-            state,
-            RtcPeerConnectionState::Failed
-                | RtcPeerConnectionState::Disconnected
-                | RtcPeerConnectionState::Closed
-        ) {
-            on_drop();
+        match state {
+            // Terminal: nothing is coming back from these.
+            RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => on_drop(),
+            RtcPeerConnectionState::Disconnected => {
+                log(&format!(
+                    "[{tag}] disconnected — waiting {}s",
+                    GRACE_MS / 1000
+                ));
+                let (p, on_drop) = (p.clone(), on_drop.clone());
+                let later = Closure::<dyn FnMut()>::new(move || {
+                    if p.connection_state() == RtcPeerConnectionState::Connected {
+                        log(&format!("[{tag}] recovered on its own"));
+                    } else {
+                        on_drop();
+                    }
+                });
+                if let Some(win) = web_sys::window() {
+                    let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        later.as_ref().unchecked_ref(),
+                        GRACE_MS,
+                    );
+                }
+                later.forget();
+            }
+            _ => {}
         }
     });
     pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
