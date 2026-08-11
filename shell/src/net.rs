@@ -13,8 +13,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    RtcConfiguration, RtcDataChannel, RtcIceGatheringState, RtcIceServer, RtcPeerConnection,
-    RtcSdpType, RtcSessionDescriptionInit,
+    RtcConfiguration, RtcDataChannel, RtcDataChannelState, RtcIceGatheringState, RtcIceServer,
+    RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit,
 };
 
 /// A public STUN server. This is the one piece of infrastructure the project
@@ -143,14 +143,26 @@ fn on_data_channel(pc: &RtcPeerConnection) -> JsFuture {
     }))
 }
 
+/// Note the state checks either side of installing the handler — the same
+/// race as `wait_for_ice`. By the time the answer is applied, the caller's
+/// channel is usually *already* open, so `onopen` fired before anyone was
+/// listening and awaiting it would hang forever.
 fn on_open(ch: &RtcDataChannel) -> JsFuture {
     let ch2 = ch.clone();
     JsFuture::from(Promise::new(&mut |resolve, _reject| {
-        let cb = Closure::<dyn FnMut()>::new(move || {
+        if ch2.ready_state() == RtcDataChannelState::Open {
             let _ = resolve.call0(&JsValue::NULL);
+            return;
+        }
+        let r = resolve.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            let _ = r.call0(&JsValue::NULL);
         });
         ch2.set_onopen(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+        if ch2.ready_state() == RtcDataChannelState::Open {
+            let _ = resolve.call0(&JsValue::NULL);
+        }
     }))
 }
 
