@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  TRUNK_VERSION: v0.21.14
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Engine tests are pure Rust and run natively in seconds. Keeping the
+      # fast feedback fast is the whole point of the zero-dependency rule.
+      - run: cargo test --workspace
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - name: install trunk
+        run: |
+          curl -sSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf- -C /usr/local/bin
+      # Pages serves this repo at /<repo>/, so asset URLs need that prefix.
+      # Without --public-url the page loads and the wasm 404s.
+      - run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
+        working-directory: shell
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: shell/dist
+      - uses: actions/deploy-pages@v4
+        id: pages
