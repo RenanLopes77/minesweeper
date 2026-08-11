@@ -7,8 +7,9 @@ exchanging an event log.
 **Status:** co-op multiplayer works, phone to laptop, over the open internet.
 Play at <https://renanlopes77.github.io/minesweeper/>.
 
-Press **Host**, scan the QR with the other device — it answers automatically —
-then send its reply link back and paste it. Two links, no accounts, no server.
+Press **Host** — the link is copied for you. Scan the QR with the other device
+and it answers automatically; send its reply link back and paste it, which
+connects on the spot. Two links, no accounts, no server.
 
 ## Layout
 
@@ -56,12 +57,11 @@ symmetric-NAT cases — and will simply fail to connect.
   at "does it work at all"; this is the pass that makes it a game someone
   would choose to play.
 
-  *Connecting*
-  - One contextual action instead of Host / Accept pasted / Copy sitting side
-    by side with no indication of which to press or when.
-  - Say what to do next at each step, and what state the connection is in.
-  - Auto-copy the link when it is generated; auto-accept a pasted reply.
-  - Hide the whole signalling panel once connected, show who is here instead.
+  *Connecting.* **Done.** Host and Join side by side — Join reads the link
+  straight off the clipboard, so a phone never needs long-press-paste; links are
+  copied to the clipboard the moment they exist; anything pasted into the box
+  is acted on without a second press; the panel disappears once connected and
+  the status line says which player you are.
 
   *The game*
   - Choose board size and mine count. `Event::Start` already carries `w`,

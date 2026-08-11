@@ -14,20 +14,22 @@ use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     Document, HtmlTextAreaElement, RtcDataChannel, RtcDataChannelType, RtcPeerConnection,
 };
 
 use crate::{app, b64, net};
 
-/// Who we are in the handshake. Decides what Accept does with the box.
+/// Who we are in the handshake. Decides what a pasted link means.
 #[derive(Clone, Copy, PartialEq)]
 enum Role {
     /// Nothing started. Pasted text is an offer to answer.
     Idle,
     /// We made the offer. Pasted text is the answer that completes it.
     Host,
+    /// Our side of the handshake is done. Further pastes mean nothing.
+    Done,
 }
 
 type Pc = Rc<RefCell<Option<RtcPeerConnection>>>;
@@ -92,6 +94,76 @@ fn show_qr(link: &str) {
     }
 }
 
+/// Selects the box and puts it on the clipboard. `select()` alone is enough on
+/// a desktop; on a phone there is no convenient Ctrl+C.
+fn copy(ta: &HtmlTextAreaElement) {
+    ta.select();
+    if let Some(win) = web_sys::window() {
+        let _ = win.navigator().clipboard().write_text(&ta.value());
+    }
+}
+
+/// The one button's job changes as the handshake progresses.
+fn set_go(label: &str) {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("go"))
+    {
+        el.set_text_content(Some(label));
+    }
+}
+
+/// Used to drop the Join button once a handshake is under way, reveal the
+/// reply box when the host needs it, and hide the whole panel once connected.
+fn display(id: &str, value: &str) {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(id))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = el.style().set_property("display", value);
+    }
+}
+
+/// Puts the caret where the next paste belongs.
+fn focus(id: &str) {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(id))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = el.focus();
+    }
+}
+
+/// Acts on a link or SDP from anywhere — the box, the clipboard, the URL.
+/// Returns whether it started a flow; junk and half-typed text return false
+/// without complaining, because the box fires this on every keystroke.
+fn accept(
+    pc: &Pc,
+    app: &app::Shared,
+    ta: &HtmlTextAreaElement,
+    role: &Rc<Cell<Role>>,
+    text: &str,
+) -> bool {
+    let was = role.get();
+    if was == Role::Done {
+        return false;
+    }
+    let Some(sdp) = sdp_from_input(text) else {
+        return false;
+    };
+    role.set(Role::Done);
+    let (pc, app, ta) = (pc.clone(), app.clone(), ta.clone());
+    spawn_local(async move {
+        match was {
+            Role::Host => finish_host(pc, &sdp).await,
+            _ => join_flow(pc, app, ta, sdp).await,
+        }
+    });
+    true
+}
+
 /// The offer carried in our own address bar, if we were opened from a link.
 fn offer_from_url() -> Option<String> {
     let hash = web_sys::window()?.location().hash().ok()?;
@@ -101,61 +173,109 @@ fn offer_from_url() -> Option<String> {
 
 pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     let ta: HtmlTextAreaElement = doc.get_element_by_id("sig").ok_or("no #sig")?.dyn_into()?;
-    let host_btn = doc.get_element_by_id("host").ok_or("no #host")?;
-    let accept_btn = doc.get_element_by_id("accept").ok_or("no #accept")?;
+    let go_btn = doc.get_element_by_id("go").ok_or("no #go")?;
 
     // Owns the connection for the life of the page; the App owns the channel.
     let pc: Pc = Rc::new(RefCell::new(None));
     let role = Rc::new(Cell::new(Role::Idle));
 
+    // One button, one job at a time: start the game before there is a link,
+    // re-copy the link after there is one.
     {
         let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
         let cb = Closure::<dyn FnMut()>::new(move || {
+            if role.get() != Role::Idle {
+                copy(&ta);
+                net::note(if role.get() == Role::Host {
+                    "copied again — send it, their reply goes in the box below"
+                } else {
+                    "copied again — send it back to the host to finish connecting"
+                });
+                return;
+            }
             let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
             spawn_local(async move { host_flow(pc, app, ta, role).await });
         });
-        host_btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
+        go_btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
         cb.forget();
     }
 
-    {
-        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+    // A link that lands in either box is acted on immediately — there is never
+    // anything else to do with it. `set_value` does not fire `input`, so our
+    // own generated links cannot trigger this. `#sig` is where a joiner pastes
+    // an offer; `#reply` is where the host pastes the answer.
+    for id in ["sig", "reply"] {
+        let src: HtmlTextAreaElement = doc.get_element_by_id(id).ok_or("no box")?.dyn_into()?;
+        let (pc, app, role, ta, s) = (
+            pc.clone(),
+            app.clone(),
+            role.clone(),
+            ta.clone(),
+            src.clone(),
+        );
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+            accept(&pc, &app, &ta, &role, &s.value());
+        });
+        src.add_event_listener_with_callback("input", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
+    // Connect: pasting already fires the flow, but a button is what people
+    // look for after filling a box, and it is the way in for typed text.
+    {
+        let (pc, app, role, ta) = (pc.clone(), app.clone(), role.clone(), ta.clone());
+        let reply: HtmlTextAreaElement = doc
+            .get_element_by_id("reply")
+            .ok_or("no #reply")?
+            .dyn_into()?;
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            if !accept(&pc, &app, &ta, &role, &reply.value()) {
+                net::note("that does not look like a reply link — paste the whole thing");
+            }
+        });
+        doc.get_element_by_id("connect")
+            .ok_or("no #connect")?
+            .add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
+        cb.forget();
+    }
+
+    // Join: the box already accepts a pasted link, but pasting on a phone is
+    // a long-press and a menu. This asks the clipboard directly.
+    {
+        let (pc, app, role) = (pc.clone(), app.clone(), role.clone());
+        let ta_j = ta.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            if role.get() != Role::Idle {
+                return;
+            }
+            ta_j.focus().ok();
+            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta_j.clone(), role.clone());
             spawn_local(async move {
-                let Some(sdp) = sdp_from_input(&ta.value()) else {
-                    return net::note("that does not look like a link or an SDP");
+                // ponytail: no clipboard-permission dance. Firefox refuses
+                // readText outright, so a failure just means "type it in".
+                let read = web_sys::window().map(|w| w.navigator().clipboard().read_text());
+                let text = match read {
+                    Some(p) => JsFuture::from(p).await.ok().and_then(|v| v.as_string()),
+                    None => None,
                 };
-                match role.get() {
-                    Role::Host => finish_host(pc, &sdp).await,
-                    Role::Idle => join_flow(pc, app, ta, sdp).await,
+                match text {
+                    Some(t) if accept(&pc, &app, &ta, &role, &t) => {
+                        net::note("link read from clipboard — answering…")
+                    }
+                    _ => net::note("paste the host's link into the box below"),
                 }
             });
         });
-        accept_btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
-        cb.forget();
-    }
-
-    {
-        // select() alone is enough on a desktop; on a phone there is no
-        // convenient Ctrl+C, so ask the clipboard directly.
-        let ta = ta.clone();
-        let copy_btn = doc.get_element_by_id("copy").ok_or("no #copy")?;
-        let cb = Closure::<dyn FnMut()>::new(move || {
-            ta.select();
-            let text = ta.value();
-            if let Some(win) = web_sys::window() {
-                let _ = win.navigator().clipboard().write_text(&text);
-                net::note("copied — send it over");
-            }
-        });
-        copy_btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
+        doc.get_element_by_id("join")
+            .ok_or("no #join")?
+            .add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
         cb.forget();
     }
 
     // Opened from a host's link: answer it without waiting to be asked.
     if let Some(offer) = offer_from_url() {
         net::note("opened from a link — answering…");
+        role.set(Role::Done);
         spawn_local(async move { join_flow(pc, app, ta, offer).await });
     }
 
@@ -174,18 +294,24 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
             watch(ch, app, "host");
             let link = make_link('o', &sdp);
             ta.set_value(&link);
-            ta.select();
+            copy(&ta);
             show_qr(&link);
+            set_go("Copy the link again");
+            display("join", "none");
+            // The box above now holds our own link, so the reply needs a box
+            // of its own — otherwise there is nowhere obvious to paste it.
+            display("replybox", "grid");
+            focus("reply");
             *pc.borrow_mut() = Some(conn);
             role.set(Role::Host);
             net::log(&format!(
-                "[host] candidates: {}",
-                net::candidate_summary(&sdp)
-            ));
-            net::note(&format!(
-                "link ready ({} chars) — send it, then paste their reply here",
+                "[host] candidates: {} ({} chars)",
+                net::candidate_summary(&sdp),
                 link.len()
             ));
+            net::note(
+                "link copied — send it, or have them scan the QR. Their reply goes in the box below.",
+            );
         }
         Err(e) => net::note(&format!("offer failed: {e:?}")),
     }
@@ -219,14 +345,18 @@ async fn join_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, offer: Str
         Ok(answer) => {
             let link = make_link('a', &answer);
             ta.set_value(&link);
-            ta.select();
+            copy(&ta);
             show_qr(&link);
+            // The joiner has done everything they can; the label is the
+            // instruction, because the button is the only thing they can press.
+            set_go("Send this reply back to the host — tap to copy it again");
+            display("join", "none");
             *pc.borrow_mut() = Some(conn);
             net::log(&format!(
                 "[join] candidates: {}",
                 net::candidate_summary(&answer)
             ));
-            net::note("reply ready — send this link back to the host");
+            net::note("reply copied — send it back to the host and they will be connected to you");
         }
         Err(e) => net::note(&format!("bad offer: {e:?}")),
     }
@@ -267,7 +397,12 @@ fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str) {
     spawn_local(async move {
         match opened.await {
             Ok(_) => {
-                net::note(&format!("CONNECTED ({tag})"));
+                display("handshake", "none");
+                net::note(if tag == "host" {
+                    "connected — you are player 1, both of you play the same board"
+                } else {
+                    "connected — you are player 2, both of you play the same board"
+                });
                 app::on_connect(&app, tag == "host");
             }
             Err(e) => net::note(&format!("[{tag}] channel failed: {e:?}")),

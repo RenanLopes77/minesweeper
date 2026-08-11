@@ -21,7 +21,7 @@
        than upscales it — sharp on a phone, sharp on a hidpi laptop. */
     #board { width: min(92vw, 20rem); height: auto; }
     #controls { display: flex; gap: .5rem; width: min(92vw, 20rem); }
-    #signalling { display: grid; gap: .5rem; width: min(90vw, 30rem); }
+    #signalling, #handshake { display: grid; gap: .5rem; width: min(90vw, 30rem); }
     .row { display: flex; gap: .5rem; }
     button {
       flex: 1; padding: .5rem; cursor: pointer;
@@ -29,6 +29,14 @@
       background: #2b3038; border: 1px solid #3a424e;
     }
     button:hover { background: #353c46; }
+    /* Hidden until the host has a link to be answered. */
+    #replybox {
+      display: none; gap: .5rem;
+      padding: .75rem; margin-top: .25rem;
+      border: 1px dashed #3a424e; background: #171b23;
+    }
+    #replybox p { margin: 0 0 .1rem; color: #8f9aab; }
+    #replybox strong { color: #dfe2e7; }
     #qr { display: none; width: min(80vw, 22rem); height: auto; image-rendering: pixelated; justify-self: center; background: #fff; padding: 0; }
     #log {
       font: 10px/1.5 ui-monospace, monospace; color: #7a8494;
@@ -48,17 +56,25 @@
   <div id="controls">
     <button id="flag" type="button">Flag mode: off</button>
   </div>
-  <p id="status">tap or left-click reveals &middot; right-click or flag mode flags</p>
+  <p id="status">Solo game. To play together: press Host, or paste a link you were sent.</p>
 
   <section id="signalling">
-    <div class="row">
-      <button id="host" type="button">Host</button>
-      <button id="accept" type="button">Accept pasted</button>
-      <button id="copy" type="button">Copy</button>
+    <div id="handshake">
+      <div class="row">
+        <button id="go" type="button">Host a game</button>
+        <button id="join" type="button">Join with a link</button>
+      </div>
+      <textarea id="sig" rows="2" spellcheck="false"
+        placeholder="Or paste a link here — it is acted on the moment it lands."></textarea>
+      <canvas id="qr" width="0" height="0"></canvas>
+      <!-- Only the host ever needs this, and only after their link exists. -->
+      <section id="replybox">
+        <p><strong>Step 2</strong> — they answered with a reply link. Paste it here.</p>
+        <textarea id="reply" rows="2" spellcheck="false"
+          placeholder="Paste their reply link"></textarea>
+        <button id="connect" type="button">Connect</button>
+      </section>
     </div>
-    <textarea id="sig" rows="2" spellcheck="false"
-      placeholder="Press Host to get a link. Or paste a link here and press Accept."></textarea>
-    <canvas id="qr" width="0" height="0"></canvas>
     <pre id="log"></pre>
   </section>
 </body>
