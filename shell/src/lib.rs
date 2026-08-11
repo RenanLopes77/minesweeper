@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use engine::{Event, Game, Reveal, Status};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d as Ctx;
 
 const CELL: f64 = 32.0;
@@ -46,23 +46,31 @@ pub fn main() -> Result<(), JsValue> {
 
     {
         let (log, game, ctx, c) = (log.clone(), game.clone(), ctx.clone(), canvas.clone());
-        let on_down = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
-            let ev = if game.borrow().status() != Status::Playing {
-                // Any click on a finished board starts a new one.
-                let seed = log.borrow().len() as u64 ^ 0x5DEE_CE66_D125;
-                Event::Start { seed, w: W, h: H, mines: MINES }
-            } else {
-                let Some((x, y)) = cell_at(&c, &e) else { return };
-                match e.button() {
-                    2 => Event::Flag { player: 0, x, y },
-                    _ => Event::Reveal { player: 0, x, y },
-                }
-            };
-            // Append first, then fold. In phase 2 the append also sends.
-            log.borrow_mut().push(ev);
-            game.borrow_mut().apply(&ev);
-            draw(&ctx, &game.borrow());
-        });
+        let on_down =
+            Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
+                let ev = if game.borrow().status() != Status::Playing {
+                    // Any click on a finished board starts a new one.
+                    let seed = log.borrow().len() as u64 ^ 0x5DEE_CE66_D125;
+                    Event::Start {
+                        seed,
+                        w: W,
+                        h: H,
+                        mines: MINES,
+                    }
+                } else {
+                    let Some((x, y)) = cell_at(&c, &e) else {
+                        return;
+                    };
+                    match e.button() {
+                        2 => Event::Flag { player: 0, x, y },
+                        _ => Event::Reveal { player: 0, x, y },
+                    }
+                };
+                // Append first, then fold. In phase 2 the append also sends.
+                log.borrow_mut().push(ev);
+                game.borrow_mut().apply(&ev);
+                draw(&ctx, &game.borrow());
+            });
         canvas.add_event_listener_with_callback("mousedown", on_down.as_ref().unchecked_ref())?;
         on_down.forget();
     }

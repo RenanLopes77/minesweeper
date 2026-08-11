@@ -87,11 +87,32 @@ mod tests {
 
     fn script(seed: u64) -> Vec<Event> {
         vec![
-            Event::Start { seed, w: 9, h: 9, mines: 10 },
-            Event::Reveal { player: 0, x: 4, y: 4 },
-            Event::Flag { player: 1, x: 0, y: 0 },
-            Event::Reveal { player: 1, x: 8, y: 8 },
-            Event::Flag { player: 0, x: 0, y: 0 }, // un-flag
+            Event::Start {
+                seed,
+                w: 9,
+                h: 9,
+                mines: 10,
+            },
+            Event::Reveal {
+                player: 0,
+                x: 4,
+                y: 4,
+            },
+            Event::Flag {
+                player: 1,
+                x: 0,
+                y: 0,
+            },
+            Event::Reveal {
+                player: 1,
+                x: 8,
+                y: 8,
+            },
+            Event::Flag {
+                player: 0,
+                x: 0,
+                y: 0,
+            }, // un-flag
         ]
     }
 
@@ -105,7 +126,12 @@ mod tests {
     #[test]
     fn replay_needs_a_start_event() {
         assert!(Game::replay(&[]).is_none());
-        assert!(Game::replay(&[Event::Reveal { player: 0, x: 0, y: 0 }]).is_none());
+        assert!(Game::replay(&[Event::Reveal {
+            player: 0,
+            x: 0,
+            y: 0
+        }])
+        .is_none());
     }
 
     #[test]
@@ -124,9 +150,17 @@ mod tests {
     fn flag_then_unflag_restores_the_hash() {
         let mut g = Game::new(7, 9, 9, 10);
         let before = g.hash();
-        g.apply(&Event::Flag { player: 0, x: 0, y: 0 });
+        g.apply(&Event::Flag {
+            player: 0,
+            x: 0,
+            y: 0,
+        });
         assert_ne!(before, g.hash(), "flagging is invisible to the hash");
-        g.apply(&Event::Flag { player: 0, x: 0, y: 0 });
+        g.apply(&Event::Flag {
+            player: 0,
+            x: 0,
+            y: 0,
+        });
         assert_eq!(before, g.hash(), "un-flagging did not restore the state");
     }
 
@@ -134,29 +168,58 @@ mod tests {
     fn out_of_bounds_events_are_ignored_not_fatal() {
         let mut g = Game::new(7, 9, 9, 10);
         let before = g.hash();
-        g.apply(&Event::Reveal { player: 9, x: 200, y: 200 });
+        g.apply(&Event::Reveal {
+            player: 9,
+            x: 200,
+            y: 200,
+        });
         assert_eq!(g.hash(), before);
     }
 
     #[test]
     fn moves_after_the_game_ends_are_ignored() {
         let mut g = Game::new(7, 9, 9, 10);
-        g.apply(&Event::Reveal { player: 0, x: 4, y: 4 });
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
         // Open every mine's neighbour-free path by brute force until we lose.
         let mine = (0..9u8)
             .flat_map(|y| (0..9u8).map(move |x| (x, y)))
             .find(|&(x, y)| g.board.get(x, y).mine)
             .unwrap();
-        g.apply(&Event::Reveal { player: 0, x: mine.0, y: mine.1 });
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: mine.0,
+            y: mine.1,
+        });
         assert_eq!(g.status(), Status::Lost);
 
         let after_loss = g.hash();
-        g.apply(&Event::Flag { player: 1, x: 0, y: 0 });
-        assert_eq!(g.hash(), after_loss, "a finished game still accepted a move");
+        g.apply(&Event::Flag {
+            player: 1,
+            x: 0,
+            y: 0,
+        });
+        assert_eq!(
+            g.hash(),
+            after_loss,
+            "a finished game still accepted a move"
+        );
 
         // ...but Start must still get through, or you can never play again.
-        g.apply(&Event::Start { seed: 8, w: 9, h: 9, mines: 10 });
-        assert_eq!(g.status(), Status::Playing, "could not restart after losing");
+        g.apply(&Event::Start {
+            seed: 8,
+            w: 9,
+            h: 9,
+            mines: 10,
+        });
+        assert_eq!(
+            g.status(),
+            Status::Playing,
+            "could not restart after losing"
+        );
     }
 
     proptest! {

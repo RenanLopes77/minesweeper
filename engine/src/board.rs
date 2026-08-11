@@ -146,7 +146,11 @@ impl Board {
     /// Note what wins: flags are irrelevant. Flagging every mine does not
     /// win the game — clearing every non-mine cell does.
     pub fn status(&self) -> Status {
-        if self.cells.iter().any(|c| c.mine && c.state == Reveal::Shown) {
+        if self
+            .cells
+            .iter()
+            .any(|c| c.mine && c.state == Reveal::Shown)
+        {
             return Status::Lost;
         }
         if self
@@ -288,7 +292,11 @@ mod tests {
         assert_eq!(b.get(0, 0).state, Reveal::Shown);
         assert_eq!(b.get(1, 0).state, Reveal::Shown, "numbered border opens");
         assert_eq!(b.get(2, 0).state, Reveal::Hidden, "mines never auto-open");
-        assert_eq!(b.get(3, 0).state, Reveal::Hidden, "past the wall stays shut");
+        assert_eq!(
+            b.get(3, 0).state,
+            Reveal::Hidden,
+            "past the wall stays shut"
+        );
     }
 
     #[test]
