@@ -87,9 +87,15 @@ symmetric-NAT cases — and will simply fail to connect.
   of it, and once it is over the flags you got wrong are crossed out.
 
   *Touch.* **Done.** A flag-mode toggle replaces the missing right button, and
-  the canvas is a 2x bitmap scaled by CSS to `min(92vw, 20rem)` — downscaled
-  rather than blown up, so it stays sharp on a phone. Long-press flagging is
-  still unbuilt; the toggle covers it without a timer.
+  the canvas is a 2x bitmap that CSS scales down, so it stays sharp on a phone.
+  The board is sized by cell count rather than by a fixed width — `--cols` and
+  `--rows` are set from Rust, and CSS takes whichever of *96vw*, *34px a cell*
+  and *70vh* bites first. Expert therefore fills a desktop without overflowing
+  it and Beginner does not stretch to match. Long-press flagging is still
+  unbuilt; the toggle covers it without a timer.
+
+  30 columns on a phone is about 16px a cell whatever the CSS says. Pinch-zoom
+  and pan is the only real fix and is not built.
 
   *Presence.* **Done.** `Event::player` finally does something: flags are drawn
   in the colour of whoever planted them, the other player's last move is ringed

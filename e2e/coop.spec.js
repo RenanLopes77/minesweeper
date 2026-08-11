@@ -41,6 +41,36 @@ async function connect(a, b, { reload = true } = {}) {
   await expect(b.locator('#status')).toContainText('connected', { timeout: 30_000 });
 }
 
+/// Expert is 30 cells wide and Beginner is 9. Sizing the canvas by a fixed
+/// width squashed one or stretched the other; it is sized by cell count now,
+/// capped by both viewport dimensions.
+test('the board fits the window at every difficulty', async ({ page }) => {
+  await page.goto('/');
+  const box = async () => page.locator('#board').boundingBox();
+  const view = page.viewportSize();
+
+  for (const [index, cols, rows] of [
+    [0, 9, 9],
+    [1, 16, 16],
+    [2, 30, 16],
+  ]) {
+    await page.locator('#level').selectOption({ index });
+    await page.locator('#restart').click();
+    const b = await box();
+
+    expect(b.width).toBeLessThanOrEqual(view.width * 0.96 + 1);
+    expect(b.height).toBeLessThanOrEqual(view.height * 0.7 + 1);
+    // Square cells: the shape on screen matches the shape of the board.
+    expect(b.width / b.height).toBeCloseTo(cols / rows, 1);
+    // And never bigger than 34px a cell, however much room there is.
+    expect(b.width / cols).toBeLessThanOrEqual(34.5);
+  }
+
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+});
+
 test('two peers play the same board', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
