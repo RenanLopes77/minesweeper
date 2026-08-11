@@ -172,10 +172,30 @@ impl App {
     }
 
     /// Everything that has to happen after the board changes: repaint, and
-    /// update the two numbers above the board.
+    /// update the text above the board.
     fn refresh(&mut self) {
         self.draw();
         self.hud();
+        self.banner();
+    }
+
+    /// The result, in the page rather than painted over the board — it used to
+    /// cover the middle row of cells, which are exactly the ones you want to
+    /// look at when you have just lost.
+    fn banner(&self) {
+        let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("banner"))
+        else {
+            return;
+        };
+        let (text, class) = match self.game.status() {
+            Status::Playing => ("", ""),
+            Status::Won => ("YOU WIN — press New game", "win"),
+            Status::Lost => ("BOOM — press New game", "lose"),
+        };
+        el.set_text_content(Some(text));
+        el.set_class_name(class);
     }
 
     /// Seconds on the clock: live while playing, frozen once it is over.
@@ -367,6 +387,19 @@ impl App {
                     let p = *who.owner.get(&(x, y)).unwrap_or(&0);
                     ctx.set_fill_style_str(PLAYERS[p as usize % PLAYERS.len()].0);
                     ctx.fill_rect(px + 11.0, py + 8.0, 11.0, 13.0);
+
+                    // At the end, a flag on a safe cell is crossed out — the
+                    // flags left standing on pink are the ones you got right.
+                    if over && !c.mine {
+                        ctx.set_stroke_style_str("#2b3038");
+                        ctx.set_line_width(3.0);
+                        ctx.begin_path();
+                        ctx.move_to(px + 6.0, py + 6.0);
+                        ctx.line_to(px + CELL - 8.0, py + CELL - 8.0);
+                        ctx.move_to(px + CELL - 8.0, py + 6.0);
+                        ctx.line_to(px + 6.0, py + CELL - 8.0);
+                        ctx.stroke();
+                    }
                 } else if c.state == Reveal::Shown && !c.mine && c.adj > 0 {
                     ctx.set_fill_style_str(DIGITS[c.adj as usize]);
                     ctx.set_font("bold 20px monospace");
@@ -392,19 +425,6 @@ impl App {
                 CELL - 4.0,
                 CELL - 4.0,
             );
-        }
-
-        if over {
-            let (msg, colour) = match self.game.status() {
-                Status::Won => ("YOU WIN — press New game", "#2e7d32"),
-                _ => ("BOOM — press New game", "#c0392b"),
-            };
-            let (w, mid) = (b.w as f64 * CELL, b.h as f64 * CELL / 2.0);
-            ctx.set_fill_style_str("rgba(20, 24, 32, 0.82)");
-            ctx.fill_rect(0.0, mid - 22.0, w, 44.0);
-            ctx.set_fill_style_str(colour);
-            ctx.set_font("bold 15px monospace");
-            let _ = ctx.fill_text(msg, 14.0, mid + 6.0);
         }
     }
 }

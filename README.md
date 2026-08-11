@@ -82,7 +82,9 @@ symmetric-NAT cases — and will simply fail to connect.
   button that starts one — the `Start` travels, so whoever presses it sets the
   difficulty for both. Clicking a dead board no longer restarts it. The canvas
   resizes itself to whatever the board became. Above it, flags left and a clock
-  that starts on the first reveal and freezes at game over.
+  that starts on the first reveal and freezes at game over. The result is a
+  line of text above the board rather than a banner painted across the middle
+  of it, and once it is over the flags you got wrong are crossed out.
 
   *Touch.* **Done.** A flag-mode toggle replaces the missing right button, and
   the canvas is a 2x bitmap scaled by CSS to `min(92vw, 20rem)` — downscaled
