@@ -39,31 +39,20 @@ jobs:
         run: |
           curl -sSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xzf- -C /usr/local/bin
-      # index.html sets data-wasm-opt="0" so trunk never fetches binaryen —
-      # its bundled TLS stack rejects GitHub's release cert
-      # ("UnsupportedCertVersion") and there is no retry that fixes it.
-      # We run wasm-opt ourselves, from apt, below.
-      - run: sudo apt-get update && sudo apt-get install -y binaryen
-
-      # Pages serves this repo at /<repo>/, so asset URLs need that prefix.
-      # Without --public-url the page loads and the wasm 404s.
+      # No wasm-opt. index.html sets data-wasm-opt="0" because trunk's bundled
+      # TLS rejects GitHub's binaryen release cert ("UnsupportedCertVersion").
+      #
+      # Running wasm-opt ourselves from apt was worse: without
+      # --enable-reference-types it rewrites wasm-bindgen's externref table
+      # with an unusable max size, and the page dies on load with
+      # "WebAssembly.Table.grow(): failed to grow table by 4". It exits 0
+      # while doing it, so an exit-code check does not catch it.
+      #
+      # 236 KB raw, 171 KB gzipped, which Pages serves. Re-adding the step
+      # needs the right feature flags AND a load test of the built artifact,
+      # not just a successful exit.
       - run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
         working-directory: shell
-
-      # Best effort: roughly halves the payload, but a shipped-and-large page
-      # beats a blocked deploy, so a failure here is a warning.
-      - name: optimise wasm
-        run: |
-          for f in shell/dist/*.wasm; do
-            before=$(stat -c%s "$f")
-            if wasm-opt -Oz --enable-bulk-memory -o "$f.opt" "$f"; then
-              mv "$f.opt" "$f"
-              echo "$f: $before -> $(stat -c%s "$f") bytes"
-            else
-              rm -f "$f.opt"
-              echo "::warning::wasm-opt failed, shipping unoptimised $f ($before bytes)"
-            fi
-          done
 
       - uses: actions/upload-pages-artifact@v3
         with:
