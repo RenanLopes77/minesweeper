@@ -45,6 +45,9 @@ pub fn main() -> Result<(), JsValue> {
         .get_context("2d")?
         .ok_or("no 2d context")?
         .dyn_into()?;
+    // The bitmap is 2x the logical board (see index.html); everything below
+    // draws in logical pixels and this scales it up once.
+    ctx.scale(app::SCALE, app::SCALE)?;
 
     let shared: app::Shared = Rc::new(RefCell::new(App::new(ctx, (now() as u64) | 1)));
     shared.borrow().draw();
@@ -67,15 +70,41 @@ pub fn main() -> Result<(), JsValue> {
                     let Some((x, y)) = cell_at(&c, &e) else {
                         return;
                     };
-                    match e.button() {
-                        2 => Event::Flag { player, x, y },
-                        _ => Event::Reveal { player, x, y },
+                    if e.button() == 2 || shared.borrow().flag_mode {
+                        Event::Flag { player, x, y }
+                    } else {
+                        Event::Reveal { player, x, y }
                     }
                 };
                 app::local(&shared, ev);
             });
         canvas.add_event_listener_with_callback("mousedown", on_down.as_ref().unchecked_ref())?;
         on_down.forget();
+    }
+
+    {
+        let btn: web_sys::HtmlElement = doc
+            .get_element_by_id("flag")
+            .ok_or("no #flag button")?
+            .dyn_into()?;
+        let (shared, b) = (shared.clone(), btn.clone());
+        let on_flag = Closure::<dyn FnMut()>::new(move || {
+            let on = {
+                let mut a = shared.borrow_mut();
+                a.flag_mode = !a.flag_mode;
+                a.flag_mode
+            };
+            b.set_text_content(Some(if on {
+                "Flag mode: ON"
+            } else {
+                "Flag mode: off"
+            }));
+            b.style()
+                .set_property("background", if on { "#c0392b" } else { "#2b3038" })
+                .ok();
+        });
+        btn.add_event_listener_with_callback("click", on_flag.as_ref().unchecked_ref())?;
+        on_flag.forget();
     }
 
     // Otherwise right-click opens the browser menu instead of flagging.
@@ -101,8 +130,8 @@ extern "C" {
 /// scaling, page scroll, and high-DPI displays.
 fn cell_at(canvas: &web_sys::HtmlCanvasElement, e: &web_sys::MouseEvent) -> Option<(u8, u8)> {
     let r = canvas.get_bounding_client_rect();
-    let sx = canvas.width() as f64 / r.width();
-    let sy = canvas.height() as f64 / r.height();
+    let sx = W as f64 * CELL / r.width();
+    let sy = H as f64 * CELL / r.height();
     let x = ((e.client_x() as f64 - r.left()) * sx / CELL).floor();
     let y = ((e.client_y() as f64 - r.top()) * sy / CELL).floor();
     if x < 0.0 || y < 0.0 || x >= W as f64 || y >= H as f64 {

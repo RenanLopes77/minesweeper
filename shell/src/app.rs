@@ -14,6 +14,9 @@ use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 use crate::net;
 
 pub const CELL: f64 = 32.0;
+/// Canvas bitmap pixels per logical pixel. The canvas element is 2x the board
+/// so CSS can shrink it to the viewport without softening the digits.
+pub const SCALE: f64 = 2.0;
 pub const W: u8 = 9;
 pub const H: u8 = 9;
 pub const MINES: u16 = 10;
@@ -29,6 +32,9 @@ pub struct App {
     /// 0 for the host, 1 for the joiner. Unused by the rules; it rides along
     /// in every event so a later chapter can attribute moves.
     pub player: u8,
+    /// Touch has no right button, so flagging needs a mode instead of a
+    /// modifier. It also works with a mouse.
+    pub flag_mode: bool,
     pub chan: Option<RtcDataChannel>,
     ctx: Ctx,
 }
@@ -46,6 +52,7 @@ impl App {
                 mines: MINES,
             }],
             player: 0,
+            flag_mode: false,
             chan: None,
             ctx,
         }

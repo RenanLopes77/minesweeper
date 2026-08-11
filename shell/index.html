@@ -17,6 +17,10 @@
       font: 13px ui-monospace, monospace;
     }
     canvas { touch-action: none; cursor: pointer; }
+    /* The bitmap is 2x the logical board so the browser downscales rather
+       than upscales it — sharp on a phone, sharp on a hidpi laptop. */
+    #board { width: min(92vw, 20rem); height: auto; }
+    #controls { display: flex; gap: .5rem; width: min(92vw, 20rem); }
     #signalling { display: grid; gap: .5rem; width: min(90vw, 30rem); }
     .row { display: flex; gap: .5rem; }
     button {
@@ -40,8 +44,11 @@
   </style>
 </head>
 <body>
-  <canvas id="board" width="288" height="288"></canvas>
-  <p id="status">left-click reveal &middot; right-click flag</p>
+  <canvas id="board" width="576" height="576"></canvas>
+  <div id="controls">
+    <button id="flag" type="button">Flag mode: off</button>
+  </div>
+  <p id="status">tap or left-click reveals &middot; right-click or flag mode flags</p>
 
   <section id="signalling">
     <div class="row">

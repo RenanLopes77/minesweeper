@@ -70,10 +70,10 @@ symmetric-NAT cases — and will simply fail to connect.
   - Deliberate restart button rather than "click anywhere on a dead board".
   - Show mines remaining, and a timer.
 
-  *Touch*
-  - **Flagging is impossible on a phone.** Input is `mousedown` + `button()`,
-    and there is no right-click on touch. Long-press, or a flag-mode toggle.
-  - The canvas is a fixed 288px; it should scale to the viewport.
+  *Touch.* **Done.** A flag-mode toggle replaces the missing right button, and
+  the canvas is a 2x bitmap scaled by CSS to `min(92vw, 20rem)` — downscaled
+  rather than blown up, so it stays sharp on a phone. Long-press flagging is
+  still unbuilt; the toggle covers it without a timer.
 
   *Presence*
   - `Event::player` is carried in every event and never used. Show who
@@ -106,9 +106,6 @@ symmetric-NAT cases — and will simply fail to connect.
   pass. That was worth designing for even if it is never used.
 
 ## Known gaps
-
-**Flagging does not work on touch devices.** Input reads `mousedown` and
-`button()`, and there is no right-click on a phone. Every tap reveals.
 
 **Three ordering hazards.** Each peer applies its own move before hearing the
 other's, so the two logs are permutations. That is usually harmless — reveals
