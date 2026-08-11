@@ -16,15 +16,19 @@ impl Game {
     }
 
     pub fn apply(&mut self, ev: &Event) {
-        // A finished game ignores everything. Peers may still have moves in
-        // flight when someone hits a mine; this makes that harmless.
+        // Start is checked before the status guard below: restarting is
+        // exactly what you do from a finished game.
+        if let Event::Start { seed, w, h, mines } = *ev {
+            *self = Game::new(seed, w, h, mines);
+            return;
+        }
+        // A finished game ignores moves. Peers may still have some in flight
+        // when someone hits a mine; this makes that harmless.
         if self.board.status() != Status::Playing {
             return;
         }
         match *ev {
-            Event::Start { seed, w, h, mines } => {
-                *self = Game::new(seed, w, h, mines);
-            }
+            Event::Start { .. } => unreachable!("handled above"),
             Event::Reveal { x, y, .. } => {
                 if !self.board.in_bounds(x as i32, y as i32) {
                     return; // a peer sent nonsense; drop it, don't panic
@@ -149,6 +153,10 @@ mod tests {
         let after_loss = g.hash();
         g.apply(&Event::Flag { player: 1, x: 0, y: 0 });
         assert_eq!(g.hash(), after_loss, "a finished game still accepted a move");
+
+        // ...but Start must still get through, or you can never play again.
+        g.apply(&Event::Start { seed: 8, w: 9, h: 9, mines: 10 });
+        assert_eq!(g.status(), Status::Playing, "could not restart after losing");
     }
 
     proptest! {
