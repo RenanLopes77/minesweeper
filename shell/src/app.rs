@@ -87,6 +87,10 @@ pub struct App {
     /// modifier. It also works with a mouse.
     pub flag_mode: bool,
     pub chan: Option<RtcDataChannel>,
+    /// Race only: the opponent's board, folded from their half of the log, and
+    /// whoever got home first. Both are `None` in the shared-board modes.
+    foe: Option<Game>,
+    winner: Option<u8>,
     ctx: Ctx,
     canvas: web_sys::HtmlCanvasElement,
 }
@@ -115,6 +119,82 @@ pub fn clock_window(log: &[Stamped], over: bool) -> (Option<u64>, Option<u64>) {
         _ => None,
     };
     (started, stopped)
+}
+
+/// The mode the current board is being played under: whatever the last
+/// `Start` said. It is in the log, so both peers read the same answer.
+pub fn mode_of(log: &[Stamped]) -> Mode {
+    log.iter()
+        .rev()
+        .find_map(|s| match s.ev {
+            Event::Start { mode, .. } => Some(mode),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Mines claimed by each player, for a flag race. A claimed mine is a flag on
+/// a mine, and the log says whose flag it is.
+pub fn scores(log: &[Stamped], b: &Board) -> [u32; 2] {
+    let who = presence(log);
+    let mut out = [0; 2];
+    for (&(x, y), &player) in &who.owner {
+        if !b.in_bounds(x as i32, y as i32) {
+            continue;
+        }
+        let c = b.get(x, y);
+        if c.mine && c.state == Reveal::Flagged {
+            if let Some(slot) = out.get_mut(player as usize) {
+                *slot += 1;
+            }
+        }
+    }
+    out
+}
+
+/// A race is one log folded into two boards: each player's moves land only on
+/// their own copy, and `Start` lands on both because it is the shared deal.
+///
+/// Returns my board, theirs, and whoever finished first — decided in this one
+/// pass, because "who won" is a question about order, not about final state.
+pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
+    let blank = || Game::replay(&events[..1]).unwrap_or(Game::new(0, 9, 9, 10, Mode::Race));
+    let (mut mine, mut theirs) = (blank(), blank());
+    let mut winner = None;
+
+    for ev in &events[1.min(events.len())..] {
+        match *ev {
+            Event::Start { .. } => {
+                mine.apply(ev);
+                theirs.apply(ev);
+                winner = None;
+            }
+            Event::Reveal { player, .. } | Event::Flag { player, .. } => {
+                let board = if player == me { &mut mine } else { &mut theirs };
+                board.apply(ev);
+                if winner.is_none() {
+                    // First board home wins; stepping on a mine hands it over.
+                    if mine.status() == Status::Won || theirs.status() == Status::Lost {
+                        winner = Some(me);
+                    } else if theirs.status() == Status::Won || mine.status() == Status::Lost {
+                        winner = Some(1 - me);
+                    }
+                }
+            }
+        }
+    }
+    (mine, theirs, winner)
+}
+
+/// How much of a board is uncovered, as cells shown out of cells to show.
+pub fn progress(b: &Board) -> (u32, u32) {
+    let shown = b
+        .cells()
+        .iter()
+        .filter(|c| c.state == Reveal::Shown)
+        .count() as u32;
+    let total = b.cells().len() as u32 - b.mines as u32;
+    (shown, total)
 }
 
 /// Flags outstanding: the classic counter, which counts flags rather than
@@ -149,6 +229,8 @@ impl App {
             player: 0,
             flag_mode: false,
             chan: None,
+            foe: None,
+            winner: None,
             ctx,
             canvas,
         }
@@ -173,9 +255,33 @@ impl App {
     /// replay only the tail.
     fn rebuild(&mut self) {
         let events: Vec<Event> = self.log.iter().map(|s| s.ev).collect();
+        if mode_of(&self.log) == Mode::Race {
+            let (mine, theirs, winner) = race_fold(&events, self.player);
+            self.game = mine;
+            self.foe = Some(theirs);
+            self.winner = winner;
+            return;
+        }
+        self.foe = None;
+        self.winner = None;
         if let Some(g) = Game::replay(&events) {
             self.game = g;
         }
+    }
+
+    /// What the peer compares against. In the shared-board modes that is the
+    /// board itself; in a race the two boards are *supposed* to differ, so the
+    /// agreement worth checking is the log both sides hold.
+    fn sync_hash(&self) -> u64 {
+        if mode_of(&self.log) != Mode::Race {
+            return self.game.hash();
+        }
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in engine::encode_log(&self.log) {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        h
     }
 
     /// Everything that has to happen after the board changes: repaint, and
@@ -196,12 +302,40 @@ impl App {
         else {
             return;
         };
-        let (text, class) = match self.game.status() {
-            Status::Playing => ("", ""),
-            Status::Won => ("YOU WIN — press New game", "win"),
-            Status::Lost => ("BOOM — press New game", "lose"),
+        let solo = self.chan.is_none();
+        let (text, class) = match mode_of(&self.log) {
+            // A race is decided by who got home first, not by the state of
+            // the board in front of you: you can finish and still have lost.
+            Mode::Race => match self.winner {
+                Some(w) if w == self.player => ("YOU WIN — press New game".into(), "win"),
+                Some(_) => ("THEY GOT THERE FIRST — press New game".into(), "lose"),
+                None => (String::new(), ""),
+            },
+            Mode::FlagRace => match self.game.status() {
+                Status::Playing => (String::new(), ""),
+                _ => {
+                    let [red, blue] = scores(&self.log, &self.game.board);
+                    let mine = if self.player == 0 { red } else { blue };
+                    let theirs = if self.player == 0 { blue } else { red };
+                    match (solo, mine.cmp(&theirs)) {
+                        (true, _) => (format!("all {red} mines claimed — press New game"), "win"),
+                        (_, std::cmp::Ordering::Greater) => {
+                            (format!("YOU WIN {mine}–{theirs} — press New game"), "win")
+                        }
+                        (_, std::cmp::Ordering::Less) => {
+                            (format!("YOU LOSE {mine}–{theirs} — press New game"), "lose")
+                        }
+                        _ => (format!("A DRAW {mine}–{theirs} — press New game"), "win"),
+                    }
+                }
+            },
+            Mode::Coop => match self.game.status() {
+                Status::Playing => (String::new(), ""),
+                Status::Won => ("YOU WIN — press New game".into(), "win"),
+                Status::Lost => ("BOOM — press New game".into(), "lose"),
+            },
         };
-        el.set_text_content(Some(text));
+        el.set_text_content(Some(&text));
         el.set_class_name(class);
     }
 
@@ -230,11 +364,20 @@ impl App {
                 Some(_) => format!(" · you are {}", PLAYERS[self.player as usize].1),
                 None => String::new(),
             };
-            el.set_text_content(Some(&format!(
-                "{} flags left · {}s{me}",
-                mines_left(&self.game.board),
-                self.seconds()
-            )));
+            let head = match mode_of(&self.log) {
+                Mode::Coop => format!("{} flags left", mines_left(&self.game.board)),
+                Mode::FlagRace => {
+                    let [red, blue] = scores(&self.log, &self.game.board);
+                    let left = self.game.board.mines as i32 - (red + blue) as i32;
+                    format!("red {red} – {blue} blue · {left} mines out there")
+                }
+                Mode::Race => {
+                    let (mine, total) = progress(&self.game.board);
+                    let theirs = self.foe.as_ref().map_or(0, |g| progress(&g.board).0);
+                    format!("you {mine}/{total} · them {theirs}/{total}")
+                }
+            };
+            el.set_text_content(Some(&format!("{head} · {}s{me}", self.seconds())));
         }
     }
 
@@ -243,7 +386,7 @@ impl App {
     fn send_state(&self) {
         self.send(&Msg::State {
             count: self.log.len() as u32,
-            hash: self.game.hash(),
+            hash: self.sync_hash(),
         });
     }
 }
@@ -327,7 +470,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
             if count as usize != a.log.len() {
                 return;
             }
-            let ours = a.game.hash();
+            let ours = a.sync_hash();
             if ours == hash {
                 return;
             }

@@ -138,10 +138,17 @@ pub fn main() -> Result<(), JsValue> {
             .get_element_by_id("level")
             .ok_or("no #level")?
             .dyn_into()?;
+        let mode_sel: web_sys::HtmlSelectElement = doc
+            .get_element_by_id("mode")
+            .ok_or("no #mode")?
+            .dyn_into()?;
         let shared = shared.clone();
         let restart = Closure::<dyn FnMut()>::new(move || {
             let i = (level.selected_index().max(0) as usize).min(LEVELS.len() - 1);
             let (w, h, mines) = LEVELS[i];
+            // The picker's order is engine::Mode's order; anything else the
+            // DOM could hand us falls back to co-op rather than guessing.
+            let mode = Mode::from_u8(mode_sel.selected_index().max(0) as u8).unwrap_or_default();
             app::local(
                 &shared,
                 Event::Start {
@@ -149,7 +156,7 @@ pub fn main() -> Result<(), JsValue> {
                     w,
                     h,
                     mines,
-                    mode: Mode::Coop,
+                    mode,
                 },
             );
         });
