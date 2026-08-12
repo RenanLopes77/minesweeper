@@ -67,12 +67,18 @@ the same elapsed time as everyone else instead of starting from zero.
     cargo test --workspace       # engine tests, native, fast
     cd shell && trunk serve      # http://127.0.0.1:8080
     cd e2e && npx playwright test  # two real browsers, real WebRTC
+    BASE_URL=https://renanlopes77.github.io/minesweeper/ npx playwright test
 
 The end-to-end tests are the only thing that exercises the DOM wiring and the
 handshake: two pages swap links exactly as a human would, then play. They
 compare `debug_hash()` — the board hash both peers are supposed to agree on —
 which is exported from the shell for this and nothing else. First run needs
 `npm install && npx playwright install chromium` in `e2e/`.
+
+`BASE_URL` points the same suite at a deployed site instead of a local build —
+production is the only place the real STUN path and GitHub Pages' own caching
+are exercised. Tests navigate with `goto('.')` rather than `'/'` so a site
+served under a project path is reachable.
 
 `index.html` lives in `shell/`, not the repo root: trunk cannot build from a
 virtual workspace with no root package.

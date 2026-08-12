@@ -47,7 +47,7 @@ const logLen = (page) => page.evaluate(() => window.wasmBindings.debug_log_len()
 /// `reload` is false when `a` is already mid-game — navigating would throw
 /// away the very log the reconnect is supposed to preserve.
 async function connect(a, b, { reload = true } = {}) {
-  if (reload) await a.goto('/');
+  if (reload) await a.goto('.');
   await a.locator('#go').click();
   await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
   const offer = await a.locator('#sig').inputValue();
@@ -67,7 +67,7 @@ async function connect(a, b, { reload = true } = {}) {
 /// width squashed one or stretched the other; it is sized by cell count now,
 /// capped by both viewport dimensions.
 test('the board fits the window at every difficulty', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('.');
   const box = async () => page.locator('#board').boundingBox();
   const view = page.viewportSize();
 
@@ -97,7 +97,7 @@ test('the board fits the window at every difficulty', async ({ page }) => {
 /// the byte on the wire cannot drift. Reordering an option used to change the
 /// game everyone played, with nothing to catch it.
 test('the mode picker comes from the engine', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('.');
   const options = page.locator('#mode option');
   await expect(options).toHaveCount(3);
   await expect(options.nth(0)).toContainText('Co-op');
@@ -180,7 +180,7 @@ test('a bad reply leaves the panel usable', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
 
-  await a.goto('/');
+  await a.goto('.');
   await a.locator('#go').click();
   await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
   const offer = await a.locator('#sig').inputValue();
@@ -226,7 +226,7 @@ test('a reconnect with the roles reversed keeps your seat and your game', async 
 
   // This time the *newcomer* hosts and the incumbent joins.
   const c = await browser.newPage();
-  await c.goto('/');
+  await c.goto('.');
   await c.locator('#go').click();
   await expect(c.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
   const invite = await c.locator('#sig').inputValue();
@@ -342,12 +342,12 @@ test('a link pasted into an already-open tab still joins', async ({ browser }) =
   const a = await browser.newPage();
   const b = await browser.newPage();
 
-  await a.goto('/');
+  await a.goto('.');
   await a.locator('#go').click();
   await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
   const offer = await a.locator('#sig').inputValue();
 
-  await b.goto('/'); // open first, *then* receive the link
+  await b.goto('.'); // open first, *then* receive the link
   await b.evaluate((url) => {
     window.location.href = url;
   }, offer);
