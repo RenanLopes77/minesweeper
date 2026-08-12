@@ -1144,7 +1144,7 @@ mod tests {
             },
             0,
         );
-        let log = vec![
+        let log = [
             deal,
             stamp(
                 1,
@@ -1209,8 +1209,8 @@ mod tests {
         );
         // Two untouched deals still resolve, the same way for both peers.
         assert_ne!(
-            theirs_survives(&vec![start(1)], &vec![start(2)]),
-            theirs_survives(&vec![start(2)], &vec![start(1)])
+            theirs_survives(&[start(1)], &[start(2)]),
+            theirs_survives(&[start(2)], &[start(1)])
         );
 
         // Taking on their game means taking the seat their moves left free.

@@ -805,7 +805,8 @@ mod flag_race_endgame {
             .collect();
         // Deciding which cells to click has to finish before clicking starts:
         // the filter borrows the board that `apply` wants to mutate.
-        let (mines, safe): (Vec<(u8, u8)>, Vec<(u8, u8)>) =
+        type Coords = Vec<(u8, u8)>;
+        let (mines, safe): (Coords, Coords) =
             cells.iter().partition(|&&(x, y)| g.board.get(x, y).mine);
         // Every safe cell first: this is what makes the board call itself won.
         for (x, y) in safe {
