@@ -191,6 +191,52 @@ test('a bad reply leaves the panel usable', async ({ browser }) => {
   await b.close();
 });
 
+/// Every reconnect in this suite kept the same peer hosting, which is the
+/// case that works. Reversing the roles used to move the returning player into
+/// the other seat, taking their own past moves with them.
+// fixme: the rule below (`theirs_survives`/`seat_in`, unit-tested in app.rs)
+// is in place, but this scenario does not yet come out right end to end and I
+// have not finished diagnosing it — a reconnect started immediately after the
+// drop leaves the panel open. Left here, failing-by-omission, because it is
+// the behaviour the README promises and the next thing to fix.
+test.fixme('a reconnect with the roles reversed keeps your seat and your game', async ({
+  browser,
+}) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+  await expect(a.locator('#hud')).toContainText('you are red');
+
+  await clickCell(a, 4, 4);
+  await expect.poll(() => logLen(b)).toBe(2);
+  const before = await hash(a);
+
+  await b.close();
+  await expect(a.locator('#status')).toContainText('connection lost', { timeout: 30_000 });
+
+  // This time the *newcomer* hosts and the incumbent joins.
+  const c = await browser.newPage();
+  await c.goto('/');
+  await c.locator('#go').click();
+  await expect(c.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  await a.locator('#sig').fill(await c.locator('#sig').inputValue());
+  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  await c.locator('#reply').fill(await a.locator('#sig').inputValue());
+  // The panel only hides once the channel is really open — "connected" also
+  // appears in "they will be connected to you", which the joiner shows before
+  // anything has happened.
+  await expect(a.locator('#handshake')).toBeHidden({ timeout: 30_000 });
+  await expect(c.locator('#handshake')).toBeHidden({ timeout: 30_000 });
+
+  // The incumbent kept its seat, so its own moves are still its own.
+  await expect(a.locator('#hud')).toContainText('you are red');
+  expect(await hash(a)).toBe(before);
+  await expect.poll(() => logLen(a)).toBeGreaterThanOrEqual(2);
+
+  await a.close();
+  await c.close();
+});
+
 /// Flag race: mines are the prize. Uncovering one claims it for your colour
 /// instead of ending the game, and the mode travels on Start so the joiner
 /// switches with the host.

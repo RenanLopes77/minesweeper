@@ -202,6 +202,63 @@ pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
     (mine, theirs, winner)
 }
 
+/// Which of two games survives when peers meet holding different ones.
+///
+/// Both sides run this over the same pair of logs, so they agree without
+/// negotiating: a game with moves in it beats an untouched deal, and a tie is
+/// broken by the deals themselves so the answer cannot depend on who asked.
+/// Deciding by "who pressed Host" instead threw away an in-progress game
+/// whenever the newcomer happened to be the one hosting.
+pub fn theirs_survives(ours: &[Stamped], theirs: &[Stamped]) -> bool {
+    let moves = |l: &[Stamped]| {
+        l.iter()
+            .filter(|s| !matches!(s.ev, Event::Start { .. }))
+            .count()
+    };
+    match moves(theirs).cmp(&moves(ours)) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => theirs.first() < ours.first(),
+    }
+}
+
+/// The seat left over once we take on somebody else's game: the one their
+/// moves are not already using.
+pub fn seat_in(log: &[Stamped], is_host: bool) -> u8 {
+    let played = |p: u8| {
+        log.iter().any(|s| match s.ev {
+            Event::Reveal { player, .. } | Event::Flag { player, .. } => player == p,
+            Event::Start { .. } => false,
+        })
+    };
+    match (played(0), played(1)) {
+        (true, false) => 1,
+        (false, true) => 0,
+        // Nobody has moved, or both have: fall back to what the connection says.
+        _ => u8::from(!is_host),
+    }
+}
+
+/// Which seat we take on a connection.
+///
+/// Identity cannot simply be "whoever pressed Host is player 0": after a drop
+/// either side may host, and a peer that changes seat mid-game takes its own
+/// past moves with it — in a race its board and the opponent's swap wholesale,
+/// and in a flag race the two scores trade places. So a player who has already
+/// moved in *this* log keeps the seat those moves were made from, and only a
+/// player with nothing at stake takes the seat the connection implies.
+pub fn seat(current: u8, is_host: bool, log: &[Stamped]) -> u8 {
+    let ours = log.iter().any(|s| match s.ev {
+        Event::Reveal { player, .. } | Event::Flag { player, .. } => player == current,
+        Event::Start { .. } => false,
+    });
+    match (ours, is_host) {
+        (true, _) => current,
+        (false, true) => 0,
+        (false, false) => 1,
+    }
+}
+
 /// Whether the game has finished under the rules actually in play.
 ///
 /// A race ends for *both* players the moment one of them is home, and the
@@ -492,12 +549,18 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                 .first()
                 .is_some_and(|s| is_foreign_start(s, ours.as_ref()));
             if handover {
-                if a.player != 0 {
-                    let Some(log) = sanitised(events) else {
-                        return net::note("ignored a log that could not be a game");
-                    };
-                    net::log(&format!("adopted host log, {} events", log.len()));
+                let Some(log) = sanitised(events) else {
+                    return net::note("ignored a log that could not be a game");
+                };
+                if theirs_survives(&a.log, &log) {
+                    net::log(&format!("adopted their game, {} events", log.len()));
+                    // Their game, so their seats: we take the one their moves
+                    // are not using. The seat our discarded log gave us no
+                    // longer means anything.
+                    a.player = seat_in(&log, a.player == 0);
                     a.log = log;
+                } else {
+                    net::log("kept our game — theirs had less in it");
                 }
             } else if events.iter().any(|s| is_foreign_start(s, ours.as_ref())) {
                 // A deal hidden behind a move: not a handover by position, so
@@ -554,7 +617,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
 /// cost more than sending them.
 pub fn on_connect(app: &Shared, is_host: bool) {
     let mut a = app.borrow_mut();
-    a.player = if is_host { 0 } else { 1 };
+    a.player = seat(a.player, is_host, &a.log);
     let log = a.log.clone();
     net::log(&format!("sent log, {} events", log.len()));
     a.send(&Msg::Events(log));
@@ -1044,6 +1107,128 @@ mod tests {
         // And the same move again is still not news.
         assert!(!merge(&mut log, &[at(u32::MAX, reveal, 99)]));
         assert_eq!(log.len(), 3);
+    }
+
+    /// Seats must survive a reconnect. After a drop either peer may host, and
+    /// a player who changed seat would take their own past moves with them:
+    /// in a race their board and the opponent's swap, in a flag race the two
+    /// scores do. Nothing else in the protocol would notice — the logs stay
+    /// identical, so the hashes agree while the two screens disagree.
+    #[test]
+    fn a_player_keeps_their_seat_across_a_role_reversal() {
+        let played_by = |p: u8| {
+            vec![
+                start(1),
+                stamp(
+                    1,
+                    Event::Reveal {
+                        player: p,
+                        x: 1,
+                        y: 1,
+                    },
+                ),
+            ]
+        };
+
+        // The host drops and comes back as the joiner: still player 0.
+        assert_eq!(seat(0, false, &played_by(0)), 0);
+        // The joiner hosts the reconnect: still player 1.
+        assert_eq!(seat(1, true, &played_by(1)), 1);
+        // Somebody with nothing at stake takes the seat the connection implies.
+        assert_eq!(seat(0, false, &[start(1)]), 1);
+        assert_eq!(seat(1, true, &[start(1)]), 0);
+        // A deal alone is nobody's move, whoever dealt it.
+        assert_eq!(seat(1, false, &played_by(0)), 1);
+    }
+
+    /// The consequence the seat rule exists to prevent, spelled out: flipping
+    /// `me` swaps the two boards wholesale.
+    #[test]
+    fn a_race_folded_from_the_other_seat_swaps_the_boards() {
+        let deal = at(
+            0,
+            Event::Start {
+                seed: 5,
+                w: 9,
+                h: 9,
+                mines: 10,
+                mode: Mode::Race,
+            },
+            0,
+        );
+        let log = vec![
+            deal,
+            stamp(
+                1,
+                Event::Reveal {
+                    player: 0,
+                    x: 4,
+                    y: 4,
+                },
+            ),
+            stamp(
+                2,
+                Event::Reveal {
+                    player: 1,
+                    x: 0,
+                    y: 0,
+                },
+            ),
+        ];
+        let events: Vec<Event> = log.iter().map(|s| s.ev).collect();
+
+        let (mine0, theirs0, w0) = race_fold(&events, 0);
+        let (mine1, theirs1, w1) = race_fold(&events, 1);
+        assert_eq!(
+            mine0.hash(),
+            theirs1.hash(),
+            "my board is not their 'theirs'"
+        );
+        assert_eq!(theirs0.hash(), mine1.hash());
+        assert_eq!(w0, w1, "the two peers named different winners");
+    }
+
+    /// Whose game survives cannot depend on who pressed Host, or a newcomer
+    /// hosting a reconnect wipes the game that was already in progress —
+    /// which is exactly what the README promises never happens.
+    #[test]
+    fn the_game_with_moves_in_it_survives_a_meeting() {
+        let played = vec![
+            start(1),
+            stamp(
+                1,
+                Event::Reveal {
+                    player: 0,
+                    x: 1,
+                    y: 1,
+                },
+            ),
+        ];
+        let fresh = vec![start(2)];
+
+        assert!(
+            theirs_survives(&fresh, &played),
+            "an untouched deal outranked a game"
+        );
+        assert!(
+            !theirs_survives(&played, &fresh),
+            "a game yielded to an untouched deal"
+        );
+        // Both sides must reach the same verdict about the same pair.
+        assert_ne!(
+            theirs_survives(&played, &fresh),
+            theirs_survives(&fresh, &played)
+        );
+        // Two untouched deals still resolve, the same way for both peers.
+        assert_ne!(
+            theirs_survives(&vec![start(1)], &vec![start(2)]),
+            theirs_survives(&vec![start(2)], &vec![start(1)])
+        );
+
+        // Taking on their game means taking the seat their moves left free.
+        assert_eq!(seat_in(&played, true), 1);
+        assert_eq!(seat_in(&fresh, true), 0);
+        assert_eq!(seat_in(&fresh, false), 1);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use app::{App, CELL, LEVELS};
-use engine::{Event, Mode, Status};
+use engine::{Event, Mode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d as Ctx;

@@ -34,6 +34,12 @@ enum Role {
 
 type Pc = Rc<RefCell<Option<RtcPeerConnection>>>;
 
+/// Which handshake is current. A connection we have walked away from keeps
+/// reporting for a while — a channel closing, ICE giving up — and those
+/// reports used to tear down whatever session had started since. Every flow
+/// remembers the generation it belongs to and stays quiet once it is stale.
+type Era = Rc<Cell<u32>>;
+
 /// `#o=` for an offer, `#a=` for an answer. The SDP is deflated first — it is
 /// repetitive ASCII, so this is most of the difference between a QR code that
 /// scans and one that does not.
@@ -184,7 +190,8 @@ fn display(id: &str, value: &str) {
 /// Back to the state the page loads in, minus the game itself: the board and
 /// its log survive a dropped channel, so reconnecting is a fresh handshake
 /// over an old game.
-fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>) {
+fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>, era: &Era) {
+    era.set(era.get().wrapping_add(1));
     // Close it, do not merely forget it. An abandoned connection keeps
     // negotiating and reports Failed minutes later — into whatever session
     // has started since, tearing that one down instead.
@@ -211,19 +218,27 @@ fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>) {
 
 /// The channel is gone. Called from the channel's own `onclose` and from the
 /// connection state machine, whichever notices first — hence the guard.
-fn dropped(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>) {
-    if app.borrow().chan.is_none() {
+fn dropped(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>, era: &Era, mine: u32) {
+    // A report from a handshake we have already left says nothing about the
+    // one we are in now.
+    if era.get() != mine || app.borrow().chan.is_none() {
         return;
     }
     app.borrow_mut().chan = None;
-    reset_handshake(pc, role);
+    reset_handshake(pc, role, era);
     net::note("connection lost — your board is kept. Host again, or paste a new link.");
 }
 
 /// `dropped` as something the state machine can hold on to.
-fn on_drop(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>) -> Rc<dyn Fn()> {
-    let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
-    Rc::new(move || dropped(&app, &pc, &role))
+fn on_drop(
+    app: &app::Shared,
+    pc: &Pc,
+    role: &Rc<Cell<Role>>,
+    era: &Era,
+    mine: u32,
+) -> Rc<dyn Fn()> {
+    let (app, pc, role, era) = (app.clone(), pc.clone(), role.clone(), era.clone());
+    Rc::new(move || dropped(&app, &pc, &role, &era, mine))
 }
 
 /// Puts the caret where the next paste belongs.
@@ -242,11 +257,13 @@ fn focus(id: &str) {
 /// `complain` is for the paths where the user pressed something and deserves
 /// an answer. The box itself fires on every keystroke, so half-typed text has
 /// to fail in silence.
+#[allow(clippy::too_many_arguments)]
 fn accept(
     pc: &Pc,
     app: &app::Shared,
     ta: &HtmlTextAreaElement,
     role: &Rc<Cell<Role>>,
+    era: &Era,
     text: &str,
     complain: bool,
 ) {
@@ -262,11 +279,12 @@ fn accept(
         }
         return;
     }
-    let (pc, app, ta, role, text) = (
+    let (pc, app, ta, role, era, text) = (
         pc.clone(),
         app.clone(),
         ta.clone(),
         role.clone(),
+        era.clone(),
         text.to_string(),
     );
     spawn_local(async move {
@@ -283,8 +301,8 @@ fn accept(
         }
         role.set(Role::Done);
         match was {
-            Role::Host => finish_host(pc, role, &sdp).await,
-            _ => join_flow(pc, app, ta, role, sdp).await,
+            Role::Host => finish_host(pc, role, era, &sdp).await,
+            _ => join_flow(pc, app, ta, role, era, sdp).await,
         }
     });
 }
@@ -315,11 +333,18 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     // Owns the connection for the life of the page; the App owns the channel.
     let pc: Pc = Rc::new(RefCell::new(None));
     let role = Rc::new(Cell::new(Role::Idle));
+    let era: Era = Rc::new(Cell::new(0));
 
     // One button, one job at a time: start the game before there is a link,
     // re-copy the link after there is one.
     {
-        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+        let (pc, app, ta, role, era) = (
+            pc.clone(),
+            app.clone(),
+            ta.clone(),
+            role.clone(),
+            era.clone(),
+        );
         let cb = Closure::<dyn FnMut()>::new(move || {
             if role.get() != Role::Idle {
                 copy(&ta);
@@ -330,8 +355,14 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
                 });
                 return;
             }
-            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
-            spawn_local(async move { host_flow(pc, app, ta, role).await });
+            let (pc, app, ta, role, era) = (
+                pc.clone(),
+                app.clone(),
+                ta.clone(),
+                role.clone(),
+                era.clone(),
+            );
+            spawn_local(async move { host_flow(pc, app, ta, role, era).await });
         });
         go_btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -343,15 +374,16 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     // an offer; `#reply` is where the host pastes the answer.
     for id in ["sig", "reply"] {
         let src: HtmlTextAreaElement = doc.get_element_by_id(id).ok_or("no box")?.dyn_into()?;
-        let (pc, app, role, ta, s) = (
+        let (pc, app, role, ta, era, s) = (
             pc.clone(),
             app.clone(),
             role.clone(),
             ta.clone(),
+            era.clone(),
             src.clone(),
         );
         let cb = Closure::<dyn FnMut()>::new(move || {
-            accept(&pc, &app, &ta, &role, &s.value(), false);
+            accept(&pc, &app, &ta, &role, &era, &s.value(), false);
         });
         src.add_event_listener_with_callback("input", cb.as_ref().unchecked_ref())?;
         cb.forget();
@@ -360,13 +392,19 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     // Connect: pasting already fires the flow, but a button is what people
     // look for after filling a box, and it is the way in for typed text.
     {
-        let (pc, app, role, ta) = (pc.clone(), app.clone(), role.clone(), ta.clone());
+        let (pc, app, role, ta, era) = (
+            pc.clone(),
+            app.clone(),
+            role.clone(),
+            ta.clone(),
+            era.clone(),
+        );
         let reply: HtmlTextAreaElement = doc
             .get_element_by_id("reply")
             .ok_or("no #reply")?
             .dyn_into()?;
         let cb = Closure::<dyn FnMut()>::new(move || {
-            accept(&pc, &app, &ta, &role, &reply.value(), true);
+            accept(&pc, &app, &ta, &role, &era, &reply.value(), true);
         });
         doc.get_element_by_id("connect")
             .ok_or("no #connect")?
@@ -377,14 +415,20 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     // Join: the box already accepts a pasted link, but pasting on a phone is
     // a long-press and a menu. This asks the clipboard directly.
     {
-        let (pc, app, role) = (pc.clone(), app.clone(), role.clone());
+        let (pc, app, role, era) = (pc.clone(), app.clone(), role.clone(), era.clone());
         let ta_j = ta.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             if role.get() != Role::Idle {
                 return;
             }
             ta_j.focus().ok();
-            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta_j.clone(), role.clone());
+            let (pc, app, ta, role, era) = (
+                pc.clone(),
+                app.clone(),
+                ta_j.clone(),
+                role.clone(),
+                era.clone(),
+            );
             spawn_local(async move {
                 // ponytail: no clipboard-permission dance. Firefox refuses
                 // readText outright, so a failure just means "type it in".
@@ -396,7 +440,7 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
                 match text.filter(|t| shape_of(t).is_some()) {
                     Some(t) => {
                         net::note("link read from clipboard — answering…");
-                        accept(&pc, &app, &ta, &role, &t, true);
+                        accept(&pc, &app, &ta, &role, &era, &t, true);
                     }
                     None => net::note("paste the host's link into the box below"),
                 }
@@ -413,17 +457,29 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     // the check below would never see it. Pasting a link into the address bar
     // of an open game is an ordinary thing to do.
     {
-        let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+        let (pc, app, ta, role, era) = (
+            pc.clone(),
+            app.clone(),
+            ta.clone(),
+            role.clone(),
+            era.clone(),
+        );
         let cb = Closure::<dyn FnMut()>::new(move || {
             if role.get() == Role::Done || !url_has_offer() {
                 return;
             }
             net::note("link in the address bar — answering…");
             role.set(Role::Done);
-            let (pc, app, ta, role) = (pc.clone(), app.clone(), ta.clone(), role.clone());
+            let (pc, app, ta, role, era) = (
+                pc.clone(),
+                app.clone(),
+                ta.clone(),
+                role.clone(),
+                era.clone(),
+            );
             spawn_local(async move {
                 match offer_from_url().await {
-                    Some(offer) => join_flow(pc, app, ta, role, offer).await,
+                    Some(offer) => join_flow(pc, app, ta, role, era, offer).await,
                     None => {
                         // Let them try again rather than sitting in Done.
                         role.set(Role::Idle);
@@ -445,7 +501,7 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
         let r = role.clone();
         spawn_local(async move {
             match offer_from_url().await {
-                Some(offer) => join_flow(pc, app, ta, r, offer).await,
+                Some(offer) => join_flow(pc, app, ta, r, era, offer).await,
                 None => {
                     r.set(Role::Idle);
                     net::note("that link did not decode — ask for it again");
@@ -457,20 +513,31 @@ pub fn wire(doc: &Document, app: app::Shared) -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<Cell<Role>>) {
+async fn host_flow(
+    pc: Pc,
+    app: app::Shared,
+    ta: HtmlTextAreaElement,
+    role: Rc<Cell<Role>>,
+    era: Era,
+) {
+    let mine = era.get();
     net::note("gathering candidates…");
     let conn = match net::new_connection() {
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
-    // Claim the role now, not when the channel opens: the peer's opening log
+    // Claim the seat now, not when the channel opens: the peer's opening log
     // can arrive before `on_open` resolves, and `remote` decides what to do
-    // with it by asking whether we are the host.
-    app.borrow_mut().player = 0;
-    net::trace_states(&conn, "host", on_drop(&app, &pc, &role));
+    // with it by asking whether we are the host. `seat` keeps it if we have
+    // already played in this game.
+    {
+        let mut a = app.borrow_mut();
+        a.player = app::seat(a.player, true, &a.log);
+    }
+    net::trace_states(&conn, "host", on_drop(&app, &pc, &role, &era, mine));
     match net::make_offer(&conn).await {
         Ok((ch, sdp)) => {
-            watch(ch, app, "host", pc.clone(), role.clone());
+            watch(ch, app, "host", pc.clone(), role.clone(), era.clone(), mine);
             let link = make_link('o', &sdp).await;
             ta.set_value(&link);
             copy(&ta);
@@ -506,16 +573,21 @@ async fn join_flow(
     app: app::Shared,
     ta: HtmlTextAreaElement,
     role: Rc<Cell<Role>>,
+    era: Era,
     offer: String,
 ) {
+    let mine = era.get();
     net::note("gathering candidates…");
     let conn = match net::new_connection() {
         Ok(c) => c,
         Err(e) => return net::note(&format!("connection failed: {e:?}")),
     };
     // Same reason as in `host_flow`: the host's log may beat our `on_open`.
-    app.borrow_mut().player = 1;
-    net::trace_states(&conn, "join", on_drop(&app, &pc, &role));
+    {
+        let mut a = app.borrow_mut();
+        a.player = app::seat(a.player, false, &a.log);
+    }
+    net::trace_states(&conn, "join", on_drop(&app, &pc, &role, &era, mine));
     net::log(&format!(
         "[join] their candidates: {}",
         net::candidate_summary(&offer)
@@ -525,10 +597,10 @@ async fn join_flow(
     // moment the connection completes.
     let incoming = net::on_data_channel(&conn);
     {
-        let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
+        let (app, pc, role, era) = (app.clone(), pc.clone(), role.clone(), era.clone());
         spawn_local(async move {
             if let Ok(Ok(ch)) = incoming.await.map(|v| v.dyn_into::<RtcDataChannel>()) {
-                watch(ch, app, "join", pc, role);
+                watch(ch, app, "join", pc, role, era, mine);
             }
         });
     }
@@ -561,7 +633,7 @@ async fn join_flow(
     }
 }
 
-async fn finish_host(pc: Pc, role: Rc<Cell<Role>>, answer: &str) {
+async fn finish_host(pc: Pc, role: Rc<Cell<Role>>, era: Era, answer: &str) {
     let Some(conn) = pc.borrow().clone() else {
         role.set(Role::Idle);
         return net::note("no connection to answer — press Host to start again");
@@ -573,7 +645,7 @@ async fn finish_host(pc: Pc, role: Rc<Cell<Role>>, answer: &str) {
             // it, so "paste it again" would be a lie — the old link is dead
             // with it. Back to a clean panel and a fresh link.
             net::log(&format!("bad reply: {e:?}"));
-            reset_handshake(&pc, &role);
+            reset_handshake(&pc, &role, &era);
             net::note("that reply did not work — press Host for a new link");
         }
     }
@@ -581,7 +653,16 @@ async fn finish_host(pc: Pc, role: Rc<Cell<Role>>, answer: &str) {
 
 /// Stores the channel and reports when it opens. Both sides end up here — the
 /// host from `create_data_channel`, the joiner from `ondatachannel`.
-fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str, pc: Pc, role: Rc<Cell<Role>>) {
+#[allow(clippy::too_many_arguments)]
+fn watch(
+    ch: RtcDataChannel,
+    app: app::Shared,
+    tag: &'static str,
+    pc: Pc,
+    role: Rc<Cell<Role>>,
+    era: Era,
+    mine: u32,
+) {
     net::log(&format!("[{tag}] channel {:?}", ch.ready_state()));
 
     // Default binaryType is "blob", which would hand us a Blob needing an
@@ -602,8 +683,8 @@ fn watch(ch: RtcDataChannel, app: app::Shared, tag: &'static str, pc: Pc, role: 
     // A drop is not the end of the game: the log stays, the handshake comes
     // back, and reconnecting merges whatever each side missed.
     {
-        let (app, pc, role) = (app.clone(), pc.clone(), role.clone());
-        let on_close = Closure::<dyn FnMut()>::new(move || dropped(&app, &pc, &role));
+        let (app, pc, role, era) = (app.clone(), pc.clone(), role.clone(), era.clone());
+        let on_close = Closure::<dyn FnMut()>::new(move || dropped(&app, &pc, &role, &era, mine));
         ch.set_onclose(Some(on_close.as_ref().unchecked_ref()));
         on_close.forget();
     }
