@@ -144,6 +144,13 @@ pub fn main() -> Result<(), JsValue> {
             .get_element_by_id("mode")
             .ok_or("no #mode")?
             .dyn_into()?;
+        // Built here rather than written out in the page: the picker's order
+        // is the wire's order, and a mode added to the enum appears by itself.
+        for mode in Mode::ALL {
+            let opt = doc.create_element("option")?;
+            opt.set_text_content(Some(mode.label()));
+            mode_sel.append_child(&opt)?;
+        }
         let shared = shared.clone();
         let restart = Closure::<dyn FnMut()>::new(move || {
             let i = (level.selected_index().max(0) as usize).min(LEVELS.len() - 1);

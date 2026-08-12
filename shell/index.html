@@ -81,13 +81,10 @@
       <option>Intermediate — 16x16, 40 mines</option>
       <option>Expert — 30x16, 99 mines</option>
     </select>
-    <!-- Order matches engine::Mode. New game sends whichever is picked, and
-         the mode travels on Start so both peers play the same game. -->
-    <select id="mode">
-      <option>Co-op — clear it together</option>
-      <option>Flag race — claim the mines</option>
-      <option>Race — same deal, a board each</option>
-    </select>
+    <!-- Filled from engine::Mode at startup: the nth option *is* the nth
+         variant, and that is now enforced by the code rather than by this
+         comment. The mode travels on Start, so both peers play the same game. -->
+    <select id="mode"></select>
     <button id="restart" type="button">New game</button>
   </div>
   <p id="status">Solo game. To play together: press Host, or paste a link you were sent.</p>

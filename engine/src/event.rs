@@ -15,14 +15,24 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Every mode, in wire order. The picker is built from this, so the list
+    /// the player sees and the byte on the wire cannot drift apart — they used
+    /// to be two hand-kept orders with a comment between them.
+    pub const ALL: [Mode; 3] = [Mode::Coop, Mode::FlagRace, Mode::Race];
+
+    /// A mode we do not know is a peer from the future. Refusing the event is
+    /// better than silently playing a different game.
     pub fn from_u8(v: u8) -> Option<Mode> {
-        match v {
-            0 => Some(Mode::Coop),
-            1 => Some(Mode::FlagRace),
-            2 => Some(Mode::Race),
-            // A mode we do not know is a peer from the future. Refusing the
-            // event is better than silently playing a different game.
-            _ => None,
+        Self::ALL.get(v as usize).copied()
+    }
+
+    /// What the picker calls it. Exhaustive on purpose: a new mode fails to
+    /// compile here rather than quietly appearing as an unnamed option.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Coop => "Co-op — clear it together",
+            Mode::FlagRace => "Flag race — claim the mines",
+            Mode::Race => "Race — same deal, a board each",
         }
     }
 }
@@ -112,4 +122,32 @@ pub struct Stamped {
     pub seq: u32,
     pub ev: Event,
     pub at_ms: u64,
+}
+
+#[cfg(test)]
+mod mode_table {
+    use super::*;
+
+    /// The picker is built from `ALL`, and the wire reads the same index back.
+    /// The two used to be hand-kept orders with a comment between them, so
+    /// reordering an option silently changed the game everyone played.
+    #[test]
+    fn every_mode_round_trips_its_own_index() {
+        for (i, mode) in Mode::ALL.into_iter().enumerate() {
+            assert_eq!(mode as u8 as usize, i, "{mode:?} is not at its own index");
+            assert_eq!(Mode::from_u8(i as u8), Some(mode));
+            assert!(!mode.label().is_empty());
+        }
+        assert_eq!(Mode::from_u8(Mode::ALL.len() as u8), None);
+        assert_eq!(Mode::from_u8(255), None);
+    }
+
+    #[test]
+    fn the_labels_are_distinct() {
+        let mut seen: Vec<&str> = Mode::ALL.iter().map(|m| m.label()).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two modes share a label");
+    }
 }

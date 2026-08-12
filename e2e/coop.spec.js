@@ -93,6 +93,23 @@ test('the board fits the window at every difficulty', async ({ page }) => {
   );
 });
 
+/// The mode picker is generated from the enum, so the list a player sees and
+/// the byte on the wire cannot drift. Reordering an option used to change the
+/// game everyone played, with nothing to catch it.
+test('the mode picker comes from the engine', async ({ page }) => {
+  await page.goto('/');
+  const options = page.locator('#mode option');
+  await expect(options).toHaveCount(3);
+  await expect(options.nth(0)).toContainText('Co-op');
+  await expect(options.nth(1)).toContainText('Flag race');
+  await expect(options.nth(2)).toContainText('Race');
+
+  // And picking the second one really starts a flag race.
+  await page.locator('#mode').selectOption({ index: 1 });
+  await page.locator('#restart').click();
+  await expect(page.locator('#hud')).toContainText('red 0 – 0 blue');
+});
+
 test('two peers play the same board', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
