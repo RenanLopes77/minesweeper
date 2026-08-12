@@ -93,8 +93,9 @@ impl Board {
             .filter(|i| !safe.contains(i))
             .collect();
 
-        let k = self.mines as usize;
-        assert!(k <= pool.len(), "{k} mines won't fit outside the safe zone");
+        // Total, not asserted: `mines` arrives from a peer, and a board that
+        // cannot hold them is a message to survive rather than a bug to trap on.
+        let k = (self.mines as usize).min(pool.len());
 
         // Partial Fisher–Yates: shuffle exactly the first k slots, take those.
         let mut rng = Rng::new(seed);
@@ -165,11 +166,16 @@ impl Board {
 
     /// Plants a flag that cannot be taken back — a claimed mine in a flag
     /// race. `toggle_flag` would let the next click hand the point back.
-    pub fn claim(&mut self, x: u8, y: u8) {
+    ///
+    /// Returns whether the claim actually landed, so the caller can credit the
+    /// player who got there first and nobody else.
+    pub fn claim(&mut self, x: u8, y: u8) -> bool {
         let i = self.idx(x, y);
-        if self.cells[i].state == Reveal::Hidden {
-            self.cells[i].state = Reveal::Flagged;
+        if self.cells[i].state != Reveal::Hidden {
+            return false;
         }
+        self.cells[i].state = Reveal::Flagged;
+        true
     }
 
     pub fn toggle_flag(&mut self, x: u8, y: u8) {

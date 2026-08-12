@@ -54,6 +54,36 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// The widest board this game deals. A peer can put any `u8` in `w`/`h`,
+    /// and 255x255 is a 1GB canvas and a fold slow enough to hang the tab, so
+    /// the limit is part of what "a legal event" means rather than a UI rule.
+    pub const MAX_W: u8 = 30;
+    pub const MAX_H: u8 = 16;
+    /// Seats at the table. Anything else splits a race: an event that is "not
+    /// me" on both peers lands on the opponent's board on both peers.
+    pub const SEATS: u8 = 2;
+
+    /// Whether this event describes a game that can actually be played.
+    ///
+    /// Every field arrives from a peer that may be buggy or hostile, and the
+    /// engine is folded over these without further checks — a board with more
+    /// mines than cells, or no cells at all, is refused here rather than
+    /// trapped over later.
+    pub fn is_playable(&self) -> bool {
+        match *self {
+            Event::Start { w, h, mines, .. } => {
+                w >= 1
+                    && h >= 1
+                    && w <= Self::MAX_W
+                    && h <= Self::MAX_H
+                    && (mines as usize) < w as usize * h as usize
+            }
+            Event::Reveal { player, .. } | Event::Flag { player, .. } => player < Self::SEATS,
+        }
+    }
+}
+
 /// An event with its place in the total order, and when it happened.
 ///
 /// `seq` is a Lamport clock: one more than the highest any peer has been seen

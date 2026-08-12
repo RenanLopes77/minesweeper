@@ -146,7 +146,11 @@ pub fn encode_msg(msg: &Msg) -> Vec<u8> {
 /// unexpected returns None instead of being partially believed.
 pub fn decode_msg(bytes: &[u8]) -> Option<Msg> {
     match *bytes.first()? {
-        MSG_EVENTS => decode_log(&bytes[1..]).map(Msg::Events),
+        // A message is all-or-nothing: one unplayable event and the whole
+        // thing is dropped, because half a log is how peers diverge quietly.
+        MSG_EVENTS => decode_log(&bytes[1..])
+            .filter(|log| log.iter().all(|s| s.ev.is_playable()))
+            .map(Msg::Events),
         MSG_STATE if bytes.len() == STATE_LEN => Some(Msg::State {
             count: u32::from_le_bytes(bytes[1..5].try_into().ok()?),
             hash: u64::from_le_bytes(bytes[5..13].try_into().ok()?),
@@ -447,6 +451,130 @@ mod tests {
         assert_eq!(decode_log(&encode_log(&[])), Some(vec![]));
     }
 
+    /// Events a peer is allowed to play. `any_event` deliberately includes
+    /// illegal ones — `Event::decode` round-trips whatever the bytes say, and
+    /// it is `decode_msg` that refuses to hand them on.
+    fn any_playable_event() -> impl Strategy<Value = Event> {
+        prop_oneof![
+            (
+                any::<u64>(),
+                1..=Event::MAX_W,
+                1..=Event::MAX_H,
+                any::<u16>(),
+                prop_oneof![Just(Mode::Coop), Just(Mode::FlagRace), Just(Mode::Race)],
+            )
+                .prop_map(|(seed, w, h, mines, mode)| Event::Start {
+                    seed,
+                    w,
+                    h,
+                    mines: mines % (w as u16 * h as u16),
+                    mode
+                }),
+            (0..Event::SEATS, any::<u8>(), any::<u8>()).prop_map(|(player, x, y)| Event::Reveal {
+                player,
+                x,
+                y
+            }),
+            (0..Event::SEATS, any::<u8>(), any::<u8>()).prop_map(|(player, x, y)| Event::Flag {
+                player,
+                x,
+                y
+            }),
+        ]
+    }
+
+    fn any_playable_stamped() -> impl Strategy<Value = Stamped> {
+        (any::<u32>(), any_playable_event(), any::<u64>()).prop_map(|(seq, ev, at_ms)| Stamped {
+            seq,
+            ev,
+            at_ms,
+        })
+    }
+
+    /// A board that cannot be dealt is refused before the engine folds it —
+    /// `place_mines` used to trap on exactly these, taking the tab with it.
+    #[test]
+    fn unplayable_events_are_refused_by_decode_msg() {
+        let bad = [
+            Event::Start {
+                seed: 1,
+                w: 9,
+                h: 9,
+                mines: 500,
+                mode: Mode::Coop,
+            },
+            Event::Start {
+                seed: 1,
+                w: 0,
+                h: 9,
+                mines: 1,
+                mode: Mode::Coop,
+            },
+            Event::Start {
+                seed: 1,
+                w: 9,
+                h: 0,
+                mines: 1,
+                mode: Mode::Coop,
+            },
+            Event::Start {
+                seed: 1,
+                w: 1,
+                h: 1,
+                mines: 1,
+                mode: Mode::Coop,
+            },
+            Event::Start {
+                seed: 1,
+                w: 255,
+                h: 255,
+                mines: 1,
+                mode: Mode::Coop,
+            },
+            Event::Reveal {
+                player: 200,
+                x: 0,
+                y: 0,
+            },
+            Event::Flag {
+                player: 2,
+                x: 0,
+                y: 0,
+            },
+        ];
+        for ev in bad {
+            assert!(!ev.is_playable(), "{ev:?} passed is_playable");
+            let msg = encode_msg(&Msg::Events(vec![stamp(0, ev)]));
+            assert_eq!(decode_msg(&msg), None, "{ev:?} survived decode_msg");
+        }
+    }
+
+    /// One bad event poisons its whole message: half a log is how peers
+    /// diverge without anyone noticing.
+    #[test]
+    fn one_unplayable_event_drops_the_whole_message() {
+        let good = stamp(
+            0,
+            Event::Start {
+                seed: 1,
+                w: 9,
+                h: 9,
+                mines: 10,
+                mode: Mode::Coop,
+            },
+        );
+        let bad = stamp(
+            1,
+            Event::Reveal {
+                player: 9,
+                x: 0,
+                y: 0,
+            },
+        );
+        assert!(decode_msg(&encode_msg(&Msg::Events(vec![good]))).is_some());
+        assert_eq!(decode_msg(&encode_msg(&Msg::Events(vec![good, bad]))), None);
+    }
+
     fn any_stamped() -> impl Strategy<Value = Stamped> {
         (any::<u32>(), any_event(), any::<u64>()).prop_map(|(seq, ev, at_ms)| Stamped {
             seq,
@@ -520,7 +648,7 @@ mod tests {
         }
 
         #[test]
-        fn event_messages_round_trip(evs in prop::collection::vec(any_stamped(), 0..64)) {
+        fn event_messages_round_trip(evs in prop::collection::vec(any_playable_stamped(), 0..64)) {
             let m = Msg::Events(evs);
             prop_assert_eq!(decode_msg(&encode_msg(&m)), Some(m));
         }

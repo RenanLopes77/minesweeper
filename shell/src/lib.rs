@@ -84,8 +84,10 @@ pub fn main() -> Result<(), JsValue> {
             Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
                 let player = shared.borrow().player;
                 // A finished board is done: New game restarts it. Clicking on
-                // it used to restart by accident.
-                if shared.borrow().game.status() != Status::Playing {
+                // it used to restart by accident. `over` rather than the board's
+                // own status, or a race that someone else has already won keeps
+                // taking moves and broadcasting them.
+                if shared.borrow().over() {
                     return;
                 }
                 let (w, h) = {

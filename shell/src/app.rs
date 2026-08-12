@@ -133,25 +133,6 @@ pub fn mode_of(log: &[Stamped]) -> Mode {
         .unwrap_or_default()
 }
 
-/// Mines claimed by each player, for a flag race. A claimed mine is a flag on
-/// a mine, and the log says whose flag it is.
-pub fn scores(log: &[Stamped], b: &Board) -> [u32; 2] {
-    let who = presence(log);
-    let mut out = [0; 2];
-    for (&(x, y), &player) in &who.owner {
-        if !b.in_bounds(x as i32, y as i32) {
-            continue;
-        }
-        let c = b.get(x, y);
-        if c.mine && c.state == Reveal::Flagged {
-            if let Some(slot) = out.get_mut(player as usize) {
-                *slot += 1;
-            }
-        }
-    }
-    out
-}
-
 /// A race is one log folded into two boards: each player's moves land only on
 /// their own copy, and `Start` lands on both because it is the shared deal.
 ///
@@ -184,6 +165,15 @@ pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
         }
     }
     (mine, theirs, winner)
+}
+
+/// Whether the game has finished under the rules actually in play.
+///
+/// A race ends for *both* players the moment one of them is home, and the
+/// loser's own board is still `Playing` at that point — so asking the board
+/// alone keeps a decided race accepting moves.
+pub fn is_over(status: Status, winner: Option<u8>) -> bool {
+    winner.is_some() || status != Status::Playing
 }
 
 /// How much of a board is uncovered, as cells shown out of cells to show.
@@ -292,6 +282,12 @@ impl App {
         self.banner();
     }
 
+    /// Finished, under this mode's rules. Public because the click handler in
+    /// `lib.rs` has to ask the same question the renderer and clock ask.
+    pub fn over(&self) -> bool {
+        is_over(self.game.status(), self.winner)
+    }
+
     /// The result, in the page rather than painted over the board — it used to
     /// cover the middle row of cells, which are exactly the ones you want to
     /// look at when you have just lost.
@@ -323,7 +319,7 @@ impl App {
             Mode::FlagRace => match self.game.status() {
                 Status::Playing => (String::new(), ""),
                 _ => {
-                    let [red, blue] = scores(&self.log, &self.game.board);
+                    let [red, blue] = self.game.scores();
                     let mine = if self.player == 0 { red } else { blue };
                     let theirs = if self.player == 0 { blue } else { red };
                     match (solo, mine.cmp(&theirs)) {
@@ -355,8 +351,7 @@ impl App {
     /// time is subtracted entirely out of the log, so it is the same number
     /// on both screens — and that is the one worth being right.
     fn seconds(&self) -> u32 {
-        let over = self.game.status() != Status::Playing;
-        let (Some(start), stop) = clock_window(&self.log, over) else {
+        let (Some(start), stop) = clock_window(&self.log, self.over()) else {
             return 0;
         };
         let now = stop.unwrap_or_else(|| js_sys::Date::now() as u64);
@@ -376,7 +371,7 @@ impl App {
             let head = match mode_of(&self.log) {
                 Mode::Coop => format!("{} flags left", mines_left(&self.game.board)),
                 Mode::FlagRace => {
-                    let [red, blue] = scores(&self.log, &self.game.board);
+                    let [red, blue] = self.game.scores();
                     let left = self.game.board.mines as i32 - (red + blue) as i32;
                     format!("red {red} – {blue} blue · {left} mines out there")
                 }
@@ -521,7 +516,7 @@ impl App {
     pub fn draw(&self) {
         let ctx = &self.ctx;
         let b = &self.game.board;
-        let over = self.game.status() != Status::Playing;
+        let over = self.over();
 
         // The board can change size under us — a restart at another
         // difficulty, or the host's log arriving. Resizing the canvas also

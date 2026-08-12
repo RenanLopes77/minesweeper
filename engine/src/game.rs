@@ -3,6 +3,11 @@ use crate::{Board, Event, Mode, Reveal, Status};
 pub struct Game {
     pub board: Board,
     pub mode: Mode,
+    /// Mines claimed per player in a flag race. Counted here, as the claim
+    /// lands, because the board deliberately refuses a second claim on the
+    /// same mine — anything that recounts afterwards from the log cannot tell
+    /// the winner from the latecomer.
+    claims: [u32; 2],
     seed: u64,
     placed: bool,
 }
@@ -12,6 +17,7 @@ impl Game {
         Game {
             board: Board::new(w, h, mines),
             mode,
+            claims: [0; 2],
             seed,
             placed: false,
         }
@@ -42,7 +48,7 @@ impl Game {
         }
         match *ev {
             Event::Start { .. } => unreachable!("handled above"),
-            Event::Reveal { x, y, .. } => {
+            Event::Reveal { player, x, y } => {
                 if !self.board.in_bounds(x as i32, y as i32) {
                     return; // a peer sent nonsense; drop it, don't panic
                 }
@@ -66,15 +72,27 @@ impl Game {
                 // uncovering one claims it. `player` is not stored — the flag
                 // is on the board and the log says who put it there.
                 if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
-                    self.board.claim(x, y);
+                    if self.board.claim(x, y) {
+                        if let Some(slot) = self.claims.get_mut(player as usize) {
+                            *slot += 1;
+                        }
+                    }
                     return;
                 }
                 self.board.reveal(x, y);
             }
             Event::Flag { x, y, .. } => {
-                if self.board.in_bounds(x as i32, y as i32) {
-                    self.board.toggle_flag(x, y);
+                if !self.board.in_bounds(x as i32, y as i32) {
+                    return;
                 }
+                // A claimed mine is somebody's point. Un-flagging it would
+                // erase that point for both players and leave the race
+                // unwinnable, so the click does nothing.
+                let c = self.board.get(x, y);
+                if self.mode == Mode::FlagRace && c.mine && c.state == Reveal::Flagged {
+                    return;
+                }
+                self.board.toggle_flag(x, y);
             }
         }
     }
@@ -85,6 +103,11 @@ impl Game {
     /// point where the result is settled.
     pub fn status(&self) -> Status {
         if self.mode == Mode::FlagRace {
+            // Before the first click there are no mines, so "every mine is
+            // claimed" is vacuously true — and would end the game at deal.
+            if !self.placed {
+                return Status::Playing;
+            }
             let claimed = self
                 .board
                 .cells()
@@ -98,6 +121,12 @@ impl Game {
             };
         }
         self.board.status()
+    }
+
+    /// Mines claimed by each player in a flag race, in player order. Zero for
+    /// every other mode, where mines are not a prize.
+    pub fn scores(&self) -> [u32; 2] {
+        self.claims
     }
 
     pub fn replay(events: &[Event]) -> Option<Game> {
@@ -668,5 +697,181 @@ mod flag_race_endgame {
             .count();
         assert_eq!(claimed, 10, "a mine was left unclaimable");
         assert_eq!(g.status(), Status::Won);
+    }
+}
+
+#[cfg(test)]
+mod claim_ownership {
+    use super::*;
+
+    fn opened(seed: u64) -> (Game, Vec<(u8, u8)>) {
+        let mut g = Game::new(seed, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mines = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.board.get(x, y).mine)
+            .collect();
+        (g, mines)
+    }
+
+    /// The board refuses a second claim on the same mine. The score has to
+    /// refuse it too, or clicking a mine your opponent already took quietly
+    /// moves the point across the table.
+    #[test]
+    fn a_re_click_does_not_steal_a_claim() {
+        let (mut g, mines) = opened(7);
+        let (x, y) = mines[0];
+
+        g.apply(&Event::Reveal { player: 0, x, y });
+        assert_eq!(g.scores(), [1, 0]);
+
+        g.apply(&Event::Reveal { player: 1, x, y });
+        assert_eq!(g.scores(), [1, 0], "the second click took the point");
+        assert_eq!(g.board.get(x, y).state, Reveal::Flagged);
+    }
+
+    #[test]
+    fn each_claim_credits_the_player_who_landed_it() {
+        let (mut g, mines) = opened(7);
+        for (i, &(x, y)) in mines.iter().enumerate() {
+            g.apply(&Event::Reveal {
+                player: (i % 2) as u8,
+                x,
+                y,
+            });
+        }
+        assert_eq!(g.scores(), [5, 5]);
+        assert_eq!(g.status(), Status::Won);
+    }
+
+    #[test]
+    fn a_restart_wipes_the_scoreboard() {
+        let (mut g, mines) = opened(7);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: mines[0].0,
+            y: mines[0].1,
+        });
+        assert_eq!(g.scores(), [1, 0]);
+
+        g.apply(&Event::Start {
+            seed: 8,
+            w: 9,
+            h: 9,
+            mines: 10,
+            mode: Mode::FlagRace,
+        });
+        assert_eq!(g.scores(), [0, 0]);
+    }
+
+    /// A peer can put any byte in `player`. Indexing the scoreboard with it
+    /// must not panic, and the claim still lands on the board.
+    #[test]
+    fn a_claim_from_an_unknown_player_is_not_fatal() {
+        let (mut g, mines) = opened(7);
+        let (x, y) = mines[0];
+        g.apply(&Event::Reveal { player: 200, x, y });
+        assert_eq!(g.scores(), [0, 0]);
+        assert_eq!(g.board.get(x, y).state, Reveal::Flagged);
+    }
+
+    /// Only mines are prizes: an ordinary flag on a safe cell scores nothing.
+    #[test]
+    fn flagging_a_safe_cell_scores_nothing() {
+        let (mut g, mines) = opened(7);
+        let safe = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .find(|c| !mines.contains(c))
+            .unwrap();
+        g.apply(&Event::Flag {
+            player: 0,
+            x: safe.0,
+            y: safe.1,
+        });
+        assert_eq!(g.scores(), [0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod hostile {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A degenerate board is not a win. `all()` over no cells is true, so an
+    /// empty board used to report `Won` before anyone had clicked, freezing
+    /// the game — `apply` refuses moves once the status leaves `Playing`.
+    #[test]
+    fn a_flag_race_is_not_won_before_the_first_click() {
+        let g = Game::new(1, 9, 9, 10, Mode::FlagRace);
+        assert_eq!(g.status(), Status::Playing);
+        let none = Game::new(1, 9, 9, 0, Mode::FlagRace);
+        assert_eq!(
+            none.status(),
+            Status::Playing,
+            "a mineless deal ended at once"
+        );
+    }
+
+    #[test]
+    fn a_claimed_mine_cannot_be_unflagged() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let (x, y) = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .find(|&(x, y)| g.board.get(x, y).mine)
+            .unwrap();
+
+        g.apply(&Event::Reveal { player: 0, x, y });
+        g.apply(&Event::Flag { player: 1, x, y });
+        assert_eq!(
+            g.board.get(x, y).state,
+            Reveal::Flagged,
+            "a flag click gave away someone's claim"
+        );
+        assert_eq!(g.scores(), [1, 0]);
+    }
+
+    proptest! {
+        /// The trust boundary, end to end: whatever a peer puts in a Start,
+        /// folding it must not panic. `place_mines` used to assert when the
+        /// mines could not fit, which aborts the whole wasm module.
+        #[test]
+        fn any_start_a_peer_can_send_folds_without_panicking(
+            seed in any::<u64>(),
+            w in 0..=40u8,
+            h in 0..=40u8,
+            mines in any::<u16>(),
+            x in any::<u8>(),
+            y in any::<u8>(),
+            mode in prop_oneof![Just(Mode::Coop), Just(Mode::FlagRace), Just(Mode::Race)],
+        ) {
+            let start = Event::Start { seed, w, h, mines, mode };
+            let mut g = Game::new(seed, w, h, mines, mode);
+            g.apply(&start);
+            g.apply(&Event::Reveal { player: 0, x, y });
+            g.apply(&Event::Flag { player: 1, x, y });
+            let _ = g.status();
+            let _ = g.hash();
+            let _ = g.scores();
+        }
+
+        /// Placement is total: never more mines than there are cells to hold
+        /// them, and never a panic reaching for the pool.
+        #[test]
+        fn placement_never_exceeds_the_board(w in 1..=20u8, h in 1..=20u8, mines in any::<u16>()) {
+            let mut b = Board::new(w, h, mines);
+            b.place_mines(9, (0, 0));
+            let placed = b.cells().iter().filter(|c| c.mine).count();
+            prop_assert!(placed <= b.cells().len());
+            prop_assert!(placed <= mines as usize);
+        }
     }
 }
