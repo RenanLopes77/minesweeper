@@ -18,6 +18,28 @@ async function clickCell(page, cx, cy, button = 'left') {
   });
 }
 
+/// Clicks every cell in one pass, in the page. Eighty-odd Playwright clicks
+/// with actionability checks is slow enough to time a test out.
+async function sweep(page) {
+  await page.evaluate(() => {
+    const c = document.getElementById('board');
+    const r = c.getBoundingClientRect();
+    const s = r.width / (c.width / 2);
+    for (let y = 0; y < c.height / 64; y++) {
+      for (let x = 0; x < c.width / 64; x++) {
+        c.dispatchEvent(
+          new MouseEvent('mousedown', {
+            clientX: r.left + (x + 0.5) * 32 * s,
+            clientY: r.top + (y + 0.5) * 32 * s,
+            button: 0,
+            bubbles: true,
+          }),
+        );
+      }
+    }
+  });
+}
+
 const hash = (page) => page.evaluate(() => window.wasmBindings.debug_hash());
 const logLen = (page) => page.evaluate(() => window.wasmBindings.debug_log_len());
 
@@ -132,6 +154,66 @@ test('losing the peer restores the handshake and keeps the board', async ({ brow
   expect(await hash(a)).toBe(before); // the board survived the drop
 
   await a.close();
+});
+
+/// Flag race: mines are the prize. Uncovering one claims it for your colour
+/// instead of ending the game, and the mode travels on Start so the joiner
+/// switches with the host.
+test('flag race scores instead of killing', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  await a.locator('#mode').selectOption({ index: 1 });
+  await a.locator('#restart').click();
+  await expect(a.locator('#hud')).toContainText('red 0 – 0 blue');
+  await expect(b.locator('#hud')).toContainText('red 0 – 0 blue', { timeout: 15_000 });
+
+  // Uncover the whole board from one side: every mine gets claimed and
+  // nobody dies, which is the entire difference from co-op.
+  await clickCell(a, 4, 4);
+  await sweep(a);
+
+  await expect(a.locator('#hud')).toContainText('0 mines out there');
+  await expect(a.locator('#banner')).toContainText('press New game');
+  await expect(b.locator('#banner')).toContainText('press New game', { timeout: 15_000 });
+  // Every mine went to the player who clicked them.
+  await expect(a.locator('#hud')).toContainText('red 10 – 0 blue');
+
+  await a.close();
+  await b.close();
+});
+
+/// Race: one deal, two boards. The mines cannot depend on who opened where,
+/// or the two of them are playing different games.
+test('race gives each player their own board from the same deal', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+  await connect(a, b);
+
+  await a.locator('#mode').selectOption({ index: 2 });
+  await a.locator('#restart').click();
+  await expect(b.locator('#hud')).toContainText('you 0/71', { timeout: 15_000 });
+
+  // Both open the protected centre: identical layouts mean identical floods.
+  await clickCell(a, 4, 4);
+  await clickCell(b, 4, 4);
+  const shown = async (p) => Number((await p.locator('#hud').textContent()).match(/you (\d+)\//)[1]);
+  await expect.poll(() => shown(a)).toBeGreaterThan(1);
+  expect(await shown(a)).toBe(await shown(b));
+
+  // Each side sees its own progress first and the other's second.
+  const theirs = async (p) => Number((await p.locator('#hud').textContent()).match(/them (\d+)\//)[1]);
+  await expect.poll(() => theirs(a)).toBe(await shown(b));
+  await expect(a.locator('#status')).not.toContainText('DESYNC');
+
+  // One racer is reckless; the other takes it.
+  await sweep(b);
+  await expect(b.locator('#banner')).toContainText('BOOM', { timeout: 15_000 });
+  await expect(a.locator('#banner')).toContainText('YOU WIN', { timeout: 15_000 });
+
+  await a.close();
+  await b.close();
 });
 
 /// A New game is a move, not a game being handed over. If a peer mistakes it

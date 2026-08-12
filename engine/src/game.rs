@@ -33,7 +33,11 @@ impl Game {
         }
         // A finished game ignores moves. Peers may still have some in flight
         // when someone hits a mine; this makes that harmless.
-        if self.board.status() != Status::Playing {
+        //
+        // It has to be *this* mode's idea of finished: the board calls itself
+        // won once every safe cell is open, which in a flag race happens while
+        // mines are still unclaimed — and would freeze the game one prize short.
+        if self.status() != Status::Playing {
             return;
         }
         match *ev {
@@ -618,5 +622,52 @@ mod race_layout_tests {
         });
         assert!(!g.board.get(4, 4).mine, "the agreed opening was a mine");
         assert_eq!(g.status(), Status::Playing);
+    }
+}
+
+#[cfg(test)]
+mod flag_race_endgame {
+    use super::*;
+
+    /// Clearing every safe cell is "won" to a plain board, but a flag race is
+    /// not over until the mines are claimed — the guard on incoming moves has
+    /// to agree, or the last mine can never be taken.
+    #[test]
+    fn the_last_mine_is_still_claimable_once_the_board_is_clear() {
+        let mut g = Game::new(11, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+
+        let cells: Vec<(u8, u8)> = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .collect();
+        // Every safe cell first: this is what makes the board call itself won.
+        for &(x, y) in cells.iter().filter(|&&(x, y)| !g.board.get(x, y).mine) {
+            g.apply(&Event::Reveal { player: 0, x, y });
+        }
+        let mines: Vec<(u8, u8)> = cells
+            .iter()
+            .copied()
+            .filter(|&(x, y)| g.board.get(x, y).mine)
+            .collect();
+        for (i, &(x, y)) in mines.iter().enumerate() {
+            g.apply(&Event::Reveal {
+                player: (i % 2) as u8,
+                x,
+                y,
+            });
+        }
+
+        let claimed = g
+            .board
+            .cells()
+            .iter()
+            .filter(|c| c.mine && c.state == Reveal::Flagged)
+            .count();
+        assert_eq!(claimed, 10, "a mine was left unclaimable");
+        assert_eq!(g.status(), Status::Won);
     }
 }

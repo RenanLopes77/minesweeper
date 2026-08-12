@@ -310,7 +310,12 @@ impl App {
                 Some(w) if w == self.player => ("YOU WIN — press New game".into(), "win"),
                 // Losing a race two ways: too slow, or too bold.
                 Some(_) if self.game.status() == Status::Lost => {
-                    ("BOOM — the race is theirs. Press New game".into(), "lose")
+                    let msg = if solo {
+                        "BOOM — press New game"
+                    } else {
+                        "BOOM — the race is theirs. Press New game"
+                    };
+                    (msg.into(), "lose")
                 }
                 Some(_) => ("THEY GOT THERE FIRST — press New game".into(), "lose"),
                 None => (String::new(), ""),
