@@ -50,7 +50,9 @@ The event log is the source of truth; board state is derived by folding
 `Event`s over a fresh board. Mines are placed on the first click, seeded from
 `(seed, first_click)` — both of which are in the log, so two peers derive
 identical boards without exchanging them. `Game::hash()` reduces the whole
-board to a `u64` for divergence detection.
+game to a `u64` for divergence detection — the cells, but also the deal they
+came from and the flag-race scoreboard, because two peers can hold identical
+cells while playing different games.
 
 Each event travels `Stamped` with a Lamport `seq` and the author's `at_ms`.
 Both peers keep the log sorted by `(seq, event)` and refold the board from it,

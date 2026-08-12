@@ -154,16 +154,36 @@ impl Game {
         Some(g)
     }
 
-    /// FNV-1a over every cell. Two peers compare this after each event and
+    /// FNV-1a over the whole game. Two peers compare this after each event and
     /// detect divergence in 8 bytes instead of shipping the whole board.
+    ///
+    /// It covers the *deal* as well as the cells — the shape of the board, the
+    /// mine count, the mode and the scoreboard. Hashing cells alone let two
+    /// peers agree while playing different games: a blank 9x9/10 co-op board
+    /// and a blank 9x9/40 race board are identical cell for cell, and a flag
+    /// race's claims are state that no cell records.
     ///
     /// Bit budget per cell: mine 1, adj 4 (0..=8), state 2 (0..=2) = 7.
     pub fn hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for c in self.board.cells() {
-            let byte = (c.mine as u8) | (c.adj << 1) | ((c.state as u8) << 5);
+        let mut mix = |byte: u8| {
             h ^= byte as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        };
+
+        mix(self.board.w);
+        mix(self.board.h);
+        for byte in self.board.mines.to_le_bytes() {
+            mix(byte);
+        }
+        mix(self.mode as u8);
+        for score in self.claims {
+            for byte in score.to_le_bytes() {
+                mix(byte);
+            }
+        }
+        for c in self.board.cells() {
+            mix((c.mine as u8) | (c.adj << 1) | ((c.state as u8) << 5));
         }
         h
     }
@@ -942,5 +962,69 @@ mod flag_race_bookkeeping {
             let laid = g.board.cells().iter().filter(|c| c.mine).count();
             prop_assert_eq!(laid, mines as usize, "a legal deal was short of mines");
         }
+    }
+}
+
+#[cfg(test)]
+mod hash_covers_the_deal {
+    use super::*;
+
+    /// Cells alone cannot tell two games apart. A blank board looks the same
+    /// whatever it was dealt from, so peers could agree on the hash while
+    /// playing different mine counts, different sizes, or different rules.
+    #[test]
+    fn a_different_deal_hashes_differently() {
+        let base = Game::new(1, 9, 9, 10, Mode::Coop);
+        assert_ne!(
+            base.hash(),
+            Game::new(1, 9, 9, 40, Mode::Coop).hash(),
+            "mines"
+        );
+        assert_ne!(
+            base.hash(),
+            Game::new(1, 16, 16, 10, Mode::Coop).hash(),
+            "size"
+        );
+        assert_ne!(
+            base.hash(),
+            Game::new(1, 9, 9, 10, Mode::Race).hash(),
+            "mode"
+        );
+        // The seed is not in the hash and must not be: it shows up as soon as
+        // the mines are placed, and before that two peers dealing the same
+        // game from different seeds have genuinely identical state.
+        assert_eq!(base.hash(), Game::new(2, 9, 9, 10, Mode::Coop).hash());
+    }
+
+    /// A flag race's scoreboard is state no cell records: the same board can
+    /// belong to either player, and only the hash can say so.
+    #[test]
+    fn the_scoreboard_is_part_of_the_state() {
+        let deal = |p: u8| {
+            let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+            g.apply(&Event::Reveal {
+                player: 0,
+                x: 4,
+                y: 4,
+            });
+            let mine = (0..9u8)
+                .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+                .find(|&(x, y)| g.board.get(x, y).mine)
+                .unwrap();
+            g.apply(&Event::Reveal {
+                player: p,
+                x: mine.0,
+                y: mine.1,
+            });
+            g
+        };
+        let (red, blue) = (deal(0), deal(1));
+        assert_eq!(red.scores(), [1, 0]);
+        assert_eq!(blue.scores(), [0, 1]);
+        assert_ne!(
+            red.hash(),
+            blue.hash(),
+            "the same board with the point on the other side hashed the same"
+        );
     }
 }

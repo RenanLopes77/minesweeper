@@ -202,6 +202,17 @@ pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
     (mine, theirs, winner)
 }
 
+/// Whether a peer's report means the two of us have actually parted company.
+///
+/// Only comparable at the same point in the log: a different count means one
+/// side is simply behind, which happens constantly and is not a fault. That
+/// gate is also the failure mode worth guarding — anything that makes the two
+/// counts differ forever turns detection off for the rest of the session
+/// without a word.
+pub fn is_desync(theirs_count: u32, theirs_hash: u64, ours_len: usize, ours_hash: u64) -> bool {
+    theirs_count as usize == ours_len && theirs_hash != ours_hash
+}
+
 /// Which of two games survives when peers meet holding different ones.
 ///
 /// Both sides run this over the same pair of logs, so they agree without
@@ -589,13 +600,8 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
             a.send_state();
         }
         Msg::State { count, hash } => {
-            // Only meaningful at the same point in the log. Different counts
-            // mean one side is simply behind, which happens constantly.
-            if count as usize != a.log.len() {
-                return;
-            }
             let ours = a.sync_hash();
-            if ours == hash {
+            if !is_desync(count, hash, a.log.len(), ours) {
                 return;
             }
             // The two boards disagree. Recovery is ch16; for now, say so
@@ -1229,6 +1235,21 @@ mod tests {
         assert_eq!(seat_in(&played, true), 1);
         assert_eq!(seat_in(&fresh, true), 0);
         assert_eq!(seat_in(&fresh, false), 1);
+    }
+
+    /// The loudest failure path in the product, and the one nothing exercised:
+    /// deleting the whole comparison used to leave every test green.
+    #[test]
+    fn a_desync_is_only_called_at_the_same_point_in_the_log() {
+        // Same length, different boards: this is the real thing.
+        assert!(is_desync(3, 0xAAAA, 3, 0xBBBB));
+        // Same length, same board: silence.
+        assert!(!is_desync(3, 0xAAAA, 3, 0xAAAA));
+        // Behind is not broken — the counts differ constantly in normal play.
+        assert!(!is_desync(2, 0xAAAA, 3, 0xBBBB));
+        assert!(!is_desync(9, 0xAAAA, 3, 0xBBBB));
+        // A count no log could reach must not panic on the cast.
+        assert!(!is_desync(u32::MAX, 0xAAAA, 3, 0xBBBB));
     }
 
     #[test]
