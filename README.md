@@ -21,6 +21,29 @@ The engine never imports anything web-shaped. That is what lets the renderer be
 swapped for wgpu later without touching game logic, and what lets the tests run
 natively in under a second.
 
+## Modes
+
+Picked next to the difficulty, and carried on `Event::Start`, so both peers
+switch together the moment someone presses New game.
+
+**Co-op** — one board, cleared together. A mine ends it for both of you.
+
+**Flag race** — one board, but the mines are the prize. Uncovering one *claims*
+it in your colour instead of killing you, and the game ends when the last one
+is taken; most claims wins. There is no way to lose a turn, so it is a race
+rather than a standoff — the MSN Messenger rule.
+
+**Race** — the same deal, a board each. Your moves land only on your copy, the
+HUD shows both scores, and the first one home wins; stepping on a mine hands it
+over. The layout cannot depend on who opened where, so mines are dealt around
+the **centre cell** rather than around your first click: the middle is the safe
+opening for both of you, and everywhere else is an honest risk.
+
+One log still carries all of it. A race just folds that log twice — your events
+onto your board, theirs onto theirs — which is also why the two peers compare a
+hash of the *log* in that mode instead of the board: their boards are supposed
+to differ.
+
 ## Design
 
 The event log is the source of truth; board state is derived by folding
