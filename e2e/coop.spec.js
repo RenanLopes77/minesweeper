@@ -194,14 +194,7 @@ test('a bad reply leaves the panel usable', async ({ browser }) => {
 /// Every reconnect in this suite kept the same peer hosting, which is the
 /// case that works. Reversing the roles used to move the returning player into
 /// the other seat, taking their own past moves with them.
-// fixme: the rule below (`theirs_survives`/`seat_in`, unit-tested in app.rs)
-// is in place, but this scenario does not yet come out right end to end and I
-// have not finished diagnosing it — a reconnect started immediately after the
-// drop leaves the panel open. Left here, failing-by-omission, because it is
-// the behaviour the README promises and the next thing to fix.
-test.fixme('a reconnect with the roles reversed keeps your seat and your game', async ({
-  browser,
-}) => {
+test('a reconnect with the roles reversed keeps your seat and your game', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
   await connect(a, b);
@@ -219,9 +212,14 @@ test.fixme('a reconnect with the roles reversed keeps your seat and your game', 
   await c.goto('/');
   await c.locator('#go').click();
   await expect(c.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
-  await a.locator('#sig').fill(await c.locator('#sig').inputValue());
-  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
-  await c.locator('#reply').fill(await a.locator('#sig').inputValue());
+  const invite = await c.locator('#sig').inputValue();
+  await a.locator('#sig').fill(invite);
+  // Wait for the box to hold a's *answer*, not the offer just pasted into it:
+  // asserting "not empty" is instantly true and hands the offer straight back.
+  await expect(a.locator('#status')).toContainText('reply copied', { timeout: 30_000 });
+  const answer = await a.locator('#sig').inputValue();
+  expect(answer).not.toBe(invite);
+  await c.locator('#reply').fill(answer);
   // The panel only hides once the channel is really open — "connected" also
   // appears in "they will be connected to you", which the joiner shows before
   // anything has happened.

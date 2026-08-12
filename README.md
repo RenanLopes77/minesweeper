@@ -153,7 +153,9 @@ symmetric-NAT cases — and will simply fail to connect.
     move — cannot fire now that both sides fold the same sequence.
   - Reconnect. **Done.** A drop — the channel closing, or the connection
     failing outright — brings the handshake panel back with the board and its
-    log intact. `disconnected` gets five seconds of grace first, because ICE
+    log intact, and it does not matter which side hosts the reconnect: a player
+    who has already moved keeps that seat, and the game with moves in it is the
+    one that survives the meeting. `disconnected` gets five seconds of grace first, because ICE
     reports it on a blip and usually recovers by itself. Hosting or pasting a new link reconnects, and both sides then
     hand over their whole log: merging two logs of the same game *is* shipping
     the missing tail, in both directions, without either side working out what
