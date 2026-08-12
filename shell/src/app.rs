@@ -308,6 +308,10 @@ impl App {
             // the board in front of you: you can finish and still have lost.
             Mode::Race => match self.winner {
                 Some(w) if w == self.player => ("YOU WIN — press New game".into(), "win"),
+                // Losing a race two ways: too slow, or too bold.
+                Some(_) if self.game.status() == Status::Lost => {
+                    ("BOOM — the race is theirs. Press New game".into(), "lose")
+                }
                 Some(_) => ("THEY GOT THERE FIRST — press New game".into(), "lose"),
                 None => (String::new(), ""),
             },
@@ -404,6 +408,12 @@ pub fn local(app: &Shared, ev: Event) {
     // last and the append is already in order.
     a.log.push(s);
     a.game.apply(&ev);
+    // A race keeps two boards and a verdict, and only the fold knows whether
+    // that move just ended it. Applying to our own board is not enough — the
+    // player who steps on a mine has to be told so themselves.
+    if mode_of(&a.log) == Mode::Race {
+        a.rebuild();
+    }
     a.send(&Msg::Events(vec![s]));
     a.send_state();
     a.refresh();
