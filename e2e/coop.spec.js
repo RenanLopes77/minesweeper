@@ -156,6 +156,41 @@ test('losing the peer restores the handshake and keeps the board', async ({ brow
   await a.close();
 });
 
+/// A mistyped reply used to end the session: the panel latched itself into
+/// "done" and swallowed every later paste, so the corrected link never landed.
+/// It now returns to a usable state instead.
+test('a bad reply leaves the panel usable', async ({ browser }) => {
+  const a = await browser.newPage();
+  const b = await browser.newPage();
+
+  await a.goto('/');
+  await a.locator('#go').click();
+  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  const offer = await a.locator('#sig').inputValue();
+
+  await b.goto(offer);
+  await expect(b.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+
+  // A plausible mistake: the host pastes back their own offer.
+  await a.locator('#reply').fill(offer);
+  await expect(a.locator('#status')).toContainText('did not work', { timeout: 30_000 });
+
+  // The panel comes back and says what to do. It used to sit in "done" and
+  // ignore every later paste, leaving reload as the only way out.
+  await expect(a.locator('#handshake')).toBeVisible();
+  await expect(a.locator('#go')).toHaveText('Host a game');
+  await expect(a.locator('#join')).toBeVisible();
+  await expect(a.locator('#reply')).toHaveValue('');
+
+  // And pressing Host really produces a new, different link.
+  await a.locator('#go').click();
+  await expect(a.locator('#sig')).not.toHaveValue('', { timeout: 30_000 });
+  expect(await a.locator('#sig').inputValue()).not.toBe(offer);
+
+  await a.close();
+  await b.close();
+});
+
 /// Flag race: mines are the prize. Uncovering one claims it for your colour
 /// instead of ending the game, and the mode travels on Start so the joiner
 /// switches with the host.

@@ -72,27 +72,34 @@ impl Game {
                 // uncovering one claims it. `player` is not stored — the flag
                 // is on the board and the log says who put it there.
                 if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
-                    if self.board.claim(x, y) {
-                        if let Some(slot) = self.claims.get_mut(player as usize) {
-                            *slot += 1;
-                        }
-                    }
+                    self.claim_for(player, x, y);
                     return;
                 }
                 self.board.reveal(x, y);
             }
-            Event::Flag { x, y, .. } => {
+            Event::Flag { player, x, y } => {
                 if !self.board.in_bounds(x as i32, y as i32) {
                     return;
                 }
-                // A claimed mine is somebody's point. Un-flagging it would
-                // erase that point for both players and leave the race
-                // unwinnable, so the click does nothing.
-                let c = self.board.get(x, y);
-                if self.mode == Mode::FlagRace && c.mine && c.state == Reveal::Flagged {
+                // In a flag race a flag on a mine *is* a claim — the same move
+                // by another name. Letting it flag without crediting anyone
+                // ends the race with a mine nobody owns and a scoreboard that
+                // does not add up to the mines on the table.
+                if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
+                    self.claim_for(player, x, y);
                     return;
                 }
                 self.board.toggle_flag(x, y);
+            }
+        }
+    }
+
+    /// Takes a mine for a player, if it is still there to take. A mine that
+    /// has already been claimed stays with whoever got there first.
+    fn claim_for(&mut self, player: u8, x: u8, y: u8) {
+        if self.board.claim(x, y) {
+            if let Some(slot) = self.claims.get_mut(player as usize) {
+                *slot += 1;
             }
         }
     }
@@ -872,6 +879,68 @@ mod hostile {
             let placed = b.cells().iter().filter(|c| c.mine).count();
             prop_assert!(placed <= b.cells().len());
             prop_assert!(placed <= mines as usize);
+        }
+    }
+}
+
+#[cfg(test)]
+mod flag_race_bookkeeping {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The scoreboard has to account for every mine on the table. A flag on a
+    /// mine used to plant a flag without crediting anyone, so the race ended
+    /// with a mine nobody owned and a tally that did not add up.
+    #[test]
+    fn a_right_click_claims_rather_than_just_flagging() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mines: Vec<(u8, u8)> = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.board.get(x, y).mine)
+            .collect();
+
+        g.apply(&Event::Flag {
+            player: 1,
+            x: mines[0].0,
+            y: mines[0].1,
+        });
+        assert_eq!(g.scores(), [0, 1], "a flagged mine credited nobody");
+
+        for &(x, y) in &mines[1..] {
+            g.apply(&Event::Reveal { player: 0, x, y });
+        }
+        assert_eq!(g.status(), Status::Won);
+        assert_eq!(
+            g.scores().iter().sum::<u32>() as u16,
+            g.board.mines,
+            "the race ended without every mine being owned"
+        );
+    }
+
+    proptest! {
+        /// Any deal the wire accepts must be a deal that can be finished: the
+        /// safe zone means a board can hold fewer mines than it has cells, and
+        /// the ones that go unplaced are prizes a flag race waits for forever.
+        #[test]
+        fn a_playable_deal_lays_every_mine_it_promises(
+            (w, h, mines) in (3..=Event::MAX_W, 3..=Event::MAX_H).prop_flat_map(|(w, h)| {
+                let room = w as u16 * h as u16 - Event::SAFE_ZONE as u16;
+                (Just(w), Just(h), 0..=room)
+            }),
+            seed in any::<u64>(),
+        ) {
+            let start = Event::Start { seed, w, h, mines, mode: Mode::FlagRace };
+            prop_assert!(start.is_playable(), "the generator produced an illegal deal");
+
+            let mut g = Game::new(seed, w, h, mines, Mode::FlagRace);
+            g.apply(&Event::Reveal { player: 0, x: w / 2, y: h / 2 });
+            let laid = g.board.cells().iter().filter(|c| c.mine).count();
+            prop_assert_eq!(laid, mines as usize, "a legal deal was short of mines");
         }
     }
 }

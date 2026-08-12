@@ -458,16 +458,18 @@ mod tests {
         prop_oneof![
             (
                 any::<u64>(),
-                1..=Event::MAX_W,
-                1..=Event::MAX_H,
-                any::<u16>(),
+                // At least 3x3, so there is room for the safe zone and a mine.
+                (3..=Event::MAX_W, 3..=Event::MAX_H).prop_flat_map(|(w, h)| {
+                    let room = w as u16 * h as u16 - Event::SAFE_ZONE as u16;
+                    (Just(w), Just(h), 0..=room)
+                }),
                 prop_oneof![Just(Mode::Coop), Just(Mode::FlagRace), Just(Mode::Race)],
             )
-                .prop_map(|(seed, w, h, mines, mode)| Event::Start {
+                .prop_map(|(seed, (w, h, mines), mode)| Event::Start {
                     seed,
                     w,
                     h,
-                    mines: mines % (w as u16 * h as u16),
+                    mines,
                     mode
                 }),
             (0..Event::SEATS, any::<u8>(), any::<u8>()).prop_map(|(player, x, y)| Event::Reveal {

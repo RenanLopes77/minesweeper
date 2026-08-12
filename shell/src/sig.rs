@@ -185,6 +185,12 @@ fn display(id: &str, value: &str) {
 /// its log survive a dropped channel, so reconnecting is a fresh handshake
 /// over an old game.
 fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>) {
+    // Close it, do not merely forget it. An abandoned connection keeps
+    // negotiating and reports Failed minutes later — into whatever session
+    // has started since, tearing that one down instead.
+    if let Some(conn) = pc.borrow().as_ref() {
+        conn.close();
+    }
     *pc.borrow_mut() = None;
     role.set(Role::Idle);
     for id in ["sig", "reply"] {
@@ -277,7 +283,7 @@ fn accept(
         }
         role.set(Role::Done);
         match was {
-            Role::Host => finish_host(pc, &sdp).await,
+            Role::Host => finish_host(pc, role, &sdp).await,
             _ => join_flow(pc, app, ta, role, sdp).await,
         }
     });
@@ -486,7 +492,12 @@ async fn host_flow(pc: Pc, app: app::Shared, ta: HtmlTextAreaElement, role: Rc<C
                 "link copied — send it, or have them scan the QR. Their reply goes in the box below.",
             );
         }
-        Err(e) => net::note(&format!("offer failed: {e:?}")),
+        Err(e) => {
+            role.set(Role::Idle);
+            net::note(&format!(
+                "could not make a link ({e:?}) — press Host to try again"
+            ));
+        }
     }
 }
 
@@ -539,17 +550,32 @@ async fn join_flow(
             ));
             net::note("reply copied — send it back to the host and they will be connected to you");
         }
-        Err(e) => net::note(&format!("bad offer: {e:?}")),
+        Err(e) => {
+            // Back to Idle, or a mistyped link would be the end of the session:
+            // every later paste is swallowed by the Done guard.
+            role.set(Role::Idle);
+            net::note(&format!(
+                "that link did not work ({e:?}) — ask for a fresh one"
+            ));
+        }
     }
 }
 
-async fn finish_host(pc: Pc, answer: &str) {
+async fn finish_host(pc: Pc, role: Rc<Cell<Role>>, answer: &str) {
     let Some(conn) = pc.borrow().clone() else {
-        return net::note("no connection to answer");
+        role.set(Role::Idle);
+        return net::note("no connection to answer — press Host to start again");
     };
     match net::accept_answer(&conn, answer).await {
         Ok(()) => net::note("reply accepted — connecting…"),
-        Err(e) => net::note(&format!("bad reply: {e:?}")),
+        Err(e) => {
+            // The connection is spent once a bad answer has been applied to
+            // it, so "paste it again" would be a lie — the old link is dead
+            // with it. Back to a clean panel and a fresh link.
+            net::log(&format!("bad reply: {e:?}"));
+            reset_handshake(&pc, &role);
+            net::note("that reply did not work — press Host for a new link");
+        }
     }
 }
 

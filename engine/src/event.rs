@@ -60,6 +60,9 @@ impl Event {
     /// the limit is part of what "a legal event" means rather than a UI rule.
     pub const MAX_W: u8 = 30;
     pub const MAX_H: u8 = 16;
+    /// The first click and its neighbours are never mined, so a board has to
+    /// hold that many cells over and above its mines.
+    pub const SAFE_ZONE: usize = 9;
     /// Seats at the table. Anything else splits a race: an event that is "not
     /// me" on both peers lands on the opponent's board on both peers.
     pub const SEATS: u8 = 2;
@@ -77,7 +80,11 @@ impl Event {
                     && h >= 1
                     && w <= Self::MAX_W
                     && h <= Self::MAX_H
-                    && (mines as usize) < w as usize * h as usize
+                    // Room for the mines *and* the safe zone around the first
+                    // click. Beyond that `place_mines` quietly lays fewer than
+                    // asked, and a flag race then waits for prizes that were
+                    // never dealt.
+                    && mines as usize + Self::SAFE_ZONE <= w as usize * h as usize
             }
             Event::Reveal { player, .. } | Event::Flag { player, .. } => player < Self::SEATS,
         }

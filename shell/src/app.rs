@@ -81,6 +81,34 @@ pub fn merge(log: &mut Vec<Stamped>, incoming: &[Stamped]) -> bool {
     changed
 }
 
+/// The most events we will fold. A peer can send a log as large as it likes,
+/// and every message re-folds the whole thing — a few thousand moves is far
+/// past any real game and still refolds in microseconds.
+pub const MAX_LOG: usize = 20_000;
+
+/// Is this event the opening of a game that is not ours? A handover always
+/// starts one: the first event of a log, a `Start` at seq 0. A restart is a
+/// move and carries seq >= 1, which is what keeps the two apart.
+pub fn is_foreign_start(s: &Stamped, ours: Option<&Stamped>) -> bool {
+    s.seq == 0 && matches!(s.ev, Event::Start { .. }) && Some(s) != ours
+}
+
+/// A log we are about to adopt wholesale has to be one we could have built
+/// ourselves: bounded, sorted, free of duplicates, and opening with a deal.
+/// `merge` binary-searches this afterwards, so an unsorted log would quietly
+/// disable de-duplication for the rest of the session.
+pub fn sanitised(mut events: Vec<Stamped>) -> Option<Vec<Stamped>> {
+    if events.len() > MAX_LOG {
+        return None;
+    }
+    events.sort();
+    events.dedup_by(|a, b| (a.seq, a.ev) == (b.seq, b.ev));
+    match events.first() {
+        Some(s) if s.seq == 0 && matches!(s.ev, Event::Start { .. }) => Some(events),
+        _ => None,
+    }
+}
+
 pub struct App {
     pub game: Game,
     pub log: Vec<Stamped>,
@@ -332,7 +360,10 @@ impl App {
                     let mine = if self.player == 0 { red } else { blue };
                     let theirs = if self.player == 0 { blue } else { red };
                     match (solo, mine.cmp(&theirs)) {
-                        (true, _) => (format!("all {red} mines claimed — press New game"), "win"),
+                        // `mine`, not `red`: a joiner left alone after a drop
+                        // keeps player 1, and would be shown its opponent's
+                        // score as its own.
+                        (true, _) => (format!("all {mine} mines claimed — press New game"), "win"),
                         (_, std::cmp::Ordering::Greater) => {
                             (format!("YOU WIN {mine}–{theirs} — press New game"), "win")
                         }
@@ -417,14 +448,14 @@ pub fn local(app: &Shared, ev: Event) {
     };
     // Our clock is at least as high as anything we have heard, so this sorts
     // last and the append is already in order.
-    a.log.push(s);
-    a.game.apply(&ev);
-    // A race keeps two boards and a verdict, and only the fold knows whether
-    // that move just ended it. Applying to our own board is not enough — the
-    // player who steps on a mine has to be told so themselves.
-    if mode_of(&a.log) == Mode::Race {
-        a.rebuild();
-    }
+    // Through `merge`, not `push`: it is the only writer that keeps the log
+    // sorted and free of duplicates. A peer can pin our clock at u32::MAX, and
+    // an appended move at a seq we already hold would sit out of order — which
+    // is exactly what `merge`'s binary search then relies on being true.
+    merge(&mut a.log, &[s]);
+    // Refold rather than patching the board with this one event: the fold is
+    // the only thing that knows about a race's two boards and its verdict.
+    a.rebuild();
     a.send(&Msg::Events(vec![s]));
     a.send_state();
     a.refresh();
@@ -456,14 +487,23 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
             // length after a New game — and `Msg::State` only compares hashes
             // when the counts agree, so getting this wrong turns off desync
             // detection for the rest of the session.
-            let other_game = matches!(events.first(), Some(s) if s.seq == 0
-                && matches!(s.ev, Event::Start { .. })
-                && Some(s) != a.log.first());
-            if other_game {
+            let ours = a.log.first().copied();
+            let handover = events
+                .first()
+                .is_some_and(|s| is_foreign_start(s, ours.as_ref()));
+            if handover {
                 if a.player != 0 {
-                    net::log(&format!("adopted host log, {} events", events.len()));
-                    a.log = events;
+                    let Some(log) = sanitised(events) else {
+                        return net::note("ignored a log that could not be a game");
+                    };
+                    net::log(&format!("adopted host log, {} events", log.len()));
+                    a.log = log;
                 }
+            } else if events.iter().any(|s| is_foreign_start(s, ours.as_ref())) {
+                // A deal hidden behind a move: not a handover by position, so
+                // it would have merged straight into our log and re-dealt the
+                // board underneath us.
+                return net::note("ignored a message trying to re-deal the board");
             } else {
                 // Same game: this is either a move or a whole log arriving
                 // after a reconnect. Merging handles both, and handles them
@@ -830,10 +870,18 @@ mod tests {
             },
             5_000,
         );
-        let is_whole_log =
-            |s: &Stamped| s.seq == 0 && matches!(s.ev, Event::Start { .. }) && *s != handshake;
-        assert!(!is_whole_log(&handshake), "our own game is not foreign");
-        assert!(!is_whole_log(&restart), "a restart is a move");
+        // Against the real predicate. This used to re-type the condition as a
+        // local closure, so it passed no matter what `remote` actually did.
+        let ours = Some(&handshake);
+        assert!(
+            !is_foreign_start(&handshake, ours),
+            "our own game is not foreign"
+        );
+        assert!(!is_foreign_start(&restart, ours), "a restart is a move");
+        assert!(
+            is_foreign_start(&start(2), ours),
+            "somebody else's deal is foreign"
+        );
 
         // And merging it leaves both sides holding the same number of events.
         let mut ours = vec![
@@ -907,6 +955,95 @@ mod tests {
     fn progress_survives_a_board_with_more_mines_than_cells() {
         let b = Board::new(4, 4, 500);
         assert_eq!(progress(&b), (0, 0));
+    }
+
+    /// A log arriving from a peer is folded and then binary-searched. Taking
+    /// one verbatim — unsorted, duplicated, or not opening with a deal — turns
+    /// de-duplication off for the rest of the session.
+    #[test]
+    fn an_adopted_log_must_be_one_we_could_have_built() {
+        let a = at(
+            2,
+            Event::Flag {
+                player: 0,
+                x: 1,
+                y: 1,
+            },
+            20,
+        );
+        let b = at(
+            1,
+            Event::Reveal {
+                player: 1,
+                x: 2,
+                y: 2,
+            },
+            10,
+        );
+
+        let tidy = sanitised(vec![a, start(1), b, a]).expect("a real log was refused");
+        assert_eq!(tidy.len(), 3, "the duplicate survived");
+        assert!(tidy.windows(2).all(|w| w[0] < w[1]), "still unsorted");
+        assert!(matches!(tidy[0].ev, Event::Start { .. }));
+
+        assert!(sanitised(vec![]).is_none(), "an empty log is not a game");
+        assert!(
+            sanitised(vec![a, b]).is_none(),
+            "a log with no deal was accepted"
+        );
+        assert!(
+            sanitised(vec![start(1); MAX_LOG + 1]).is_none(),
+            "an unbounded log was accepted"
+        );
+    }
+
+    /// Every difficulty has to survive the wire. Expert sits exactly on both
+    /// dimension limits, so shrinking a bound — or adding a bigger level —
+    /// would have the peer silently drop every message containing that deal,
+    /// with no error and no DESYNC, because the counts would never match.
+    #[test]
+    fn every_difficulty_is_an_event_a_peer_will_accept() {
+        for (w, h, mines) in LEVELS {
+            let deal = Event::Start {
+                seed: 1,
+                w,
+                h,
+                mines,
+                mode: Mode::Coop,
+            };
+            assert!(
+                deal.is_playable(),
+                "{w}x{h} with {mines} mines is unplayable"
+            );
+        }
+    }
+
+    /// A move made while a peer has pinned our clock at its ceiling must not
+    /// land out of order: `merge`'s binary search is what everything else
+    /// leans on, and it needs the log sorted.
+    #[test]
+    fn a_saturated_clock_cannot_unsort_the_log() {
+        let flag = Event::Flag {
+            player: 0,
+            x: 3,
+            y: 3,
+        };
+        let reveal = Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        };
+        let mut log = vec![start(1), at(u32::MAX, flag, 10)];
+
+        // A local move at the same saturated seq, sorting before the flag.
+        merge(&mut log, &[at(u32::MAX, reveal, 20)]);
+        assert!(
+            log.windows(2).all(|w| w[0] < w[1]),
+            "the log came back unsorted"
+        );
+        // And the same move again is still not news.
+        assert!(!merge(&mut log, &[at(u32::MAX, reveal, 99)]));
+        assert_eq!(log.len(), 3);
     }
 
     #[test]
