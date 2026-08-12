@@ -66,9 +66,16 @@ const DIGITS: [&str; 9] = [
 pub fn merge(log: &mut Vec<Stamped>, incoming: &[Stamped]) -> bool {
     let mut changed = false;
     for &s in incoming {
-        if let Err(i) = log.binary_search(&s) {
-            log.insert(i, s);
-            changed = true;
+        // A move is identified by its place in the order and what it does —
+        // *not* by when it was made. `at_ms` is in `Stamped`'s derived `Ord`,
+        // so an echo of one of our own moves with a fresh timestamp would sort
+        // as a separate entry and toggle the same flag a second time.
+        match log.binary_search_by(|p| (p.seq, p.ev).cmp(&(s.seq, s.ev))) {
+            Ok(_) => {}
+            Err(i) => {
+                log.insert(i, s);
+                changed = true;
+            }
         }
     }
     changed
@@ -183,7 +190,9 @@ pub fn progress(b: &Board) -> (u32, u32) {
         .iter()
         .filter(|c| c.state == Reveal::Shown)
         .count() as u32;
-    let total = b.cells().len() as u32 - b.mines as u32;
+    // Saturating: a peer's board can claim more mines than it has cells, and
+    // a HUD is not worth aborting the module over.
+    let total = (b.cells().len() as u32).saturating_sub(b.mines as u32);
     (shown, total)
 }
 
@@ -398,7 +407,9 @@ impl App {
 /// A move made on this device.
 pub fn local(app: &Shared, ev: Event) {
     let mut a = app.borrow_mut();
-    a.clock += 1;
+    // Saturating: a peer can hand us seq = u32::MAX, and wrapping would put
+    // our next move at the very start of the log.
+    a.clock = a.clock.saturating_add(1);
     let s = Stamped {
         seq: a.clock,
         ev,
@@ -841,6 +852,61 @@ mod tests {
         merge(&mut theirs, &[restart]);
         assert_eq!(ours.len(), 3);
         assert_eq!(ours, theirs);
+    }
+
+    /// A peer can echo one of our own moves back with a fresh timestamp. If
+    /// the timestamp were part of a move's identity, that echo would land as a
+    /// second move and toggle the same flag off again — with both peers
+    /// agreeing on the corrupted board, so no DESYNC would ever fire.
+    #[test]
+    fn a_move_re_stamped_with_a_new_time_is_not_a_second_move() {
+        let flag = Event::Flag {
+            player: 0,
+            x: 3,
+            y: 3,
+        };
+        let mut log = vec![start(1), at(1, flag, 1_000)];
+        let echo = at(1, flag, 9_999);
+
+        assert!(!merge(&mut log, &[echo]), "the echo was treated as news");
+        assert_eq!(log.len(), 2, "the same move was logged twice");
+        assert_eq!(log[1].at_ms, 1_000, "the original timestamp was replaced");
+    }
+
+    /// Two different moves that share a seq are still two moves.
+    #[test]
+    fn the_same_seq_from_two_players_keeps_both_moves() {
+        let mine = stamp(
+            1,
+            Event::Reveal {
+                player: 0,
+                x: 1,
+                y: 1,
+            },
+        );
+        let theirs = stamp(
+            1,
+            Event::Reveal {
+                player: 1,
+                x: 2,
+                y: 2,
+            },
+        );
+        let mut log = vec![start(1), mine];
+        assert!(merge(&mut log, &[theirs]));
+        assert_eq!(log.len(), 3);
+        assert!(
+            log.windows(2).all(|w| w[0] < w[1]),
+            "the log came back unsorted"
+        );
+    }
+
+    /// A board that claims more mines than it has cells is a peer's invention,
+    /// not a crash: the HUD used to underflow and abort the module.
+    #[test]
+    fn progress_survives_a_board_with_more_mines_than_cells() {
+        let b = Board::new(4, 4, 500);
+        assert_eq!(progress(&b), (0, 0));
     }
 
     #[test]
