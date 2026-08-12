@@ -1,15 +1,17 @@
-use crate::{Board, Event, Status};
+use crate::{Board, Event, Mode, Reveal, Status};
 
 pub struct Game {
     pub board: Board,
+    pub mode: Mode,
     seed: u64,
     placed: bool,
 }
 
 impl Game {
-    pub fn new(seed: u64, w: u8, h: u8, mines: u16) -> Self {
+    pub fn new(seed: u64, w: u8, h: u8, mines: u16, mode: Mode) -> Self {
         Game {
             board: Board::new(w, h, mines),
+            mode,
             seed,
             placed: false,
         }
@@ -18,8 +20,15 @@ impl Game {
     pub fn apply(&mut self, ev: &Event) {
         // Start is checked before the status guard below: restarting is
         // exactly what you do from a finished game.
-        if let Event::Start { seed, w, h, mines } = *ev {
-            *self = Game::new(seed, w, h, mines);
+        if let Event::Start {
+            seed,
+            w,
+            h,
+            mines,
+            mode,
+        } = *ev
+        {
+            *self = Game::new(seed, w, h, mines, mode);
             return;
         }
         // A finished game ignores moves. Peers may still have some in flight
@@ -40,6 +49,13 @@ impl Game {
                     self.board.place_mines(self.seed, (x, y));
                     self.placed = true;
                 }
+                // In a flag race the mines are the prize, not the punishment:
+                // uncovering one claims it. `player` is not stored — the flag
+                // is on the board and the log says who put it there.
+                if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
+                    self.board.claim(x, y);
+                    return;
+                }
                 self.board.reveal(x, y);
             }
             Event::Flag { x, y, .. } => {
@@ -50,15 +66,39 @@ impl Game {
         }
     }
 
+    /// A flag race ends when the last mine is claimed — nobody can lose it,
+    /// so the board's own "did anyone step on a mine" rule never fires and
+    /// its "is everything safe uncovered" rule would drag the game past the
+    /// point where the result is settled.
     pub fn status(&self) -> Status {
+        if self.mode == Mode::FlagRace {
+            let claimed = self
+                .board
+                .cells()
+                .iter()
+                .filter(|c| c.mine && c.state == Reveal::Flagged)
+                .count();
+            return if claimed as u16 == self.board.mines {
+                Status::Won
+            } else {
+                Status::Playing
+            };
+        }
         self.board.status()
     }
 
     pub fn replay(events: &[Event]) -> Option<Game> {
-        let Event::Start { seed, w, h, mines } = *events.first()? else {
+        let Event::Start {
+            seed,
+            w,
+            h,
+            mines,
+            mode,
+        } = *events.first()?
+        else {
             return None;
         };
-        let mut g = Game::new(seed, w, h, mines);
+        let mut g = Game::new(seed, w, h, mines, mode);
         for ev in &events[1..] {
             g.apply(ev);
         }
@@ -92,6 +132,7 @@ mod tests {
                 w: 9,
                 h: 9,
                 mines: 10,
+                mode: Mode::Coop,
             },
             Event::Reveal {
                 player: 0,
@@ -136,7 +177,7 @@ mod tests {
 
     #[test]
     fn hash_reacts_to_every_move() {
-        let mut g = Game::new(7, 9, 9, 10);
+        let mut g = Game::new(7, 9, 9, 10, Mode::Coop);
         let mut seen = vec![g.hash()];
         for ev in &script(7)[1..] {
             g.apply(ev);
@@ -148,7 +189,7 @@ mod tests {
 
     #[test]
     fn flag_then_unflag_restores_the_hash() {
-        let mut g = Game::new(7, 9, 9, 10);
+        let mut g = Game::new(7, 9, 9, 10, Mode::Coop);
         let before = g.hash();
         g.apply(&Event::Flag {
             player: 0,
@@ -166,7 +207,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_events_are_ignored_not_fatal() {
-        let mut g = Game::new(7, 9, 9, 10);
+        let mut g = Game::new(7, 9, 9, 10, Mode::Coop);
         let before = g.hash();
         g.apply(&Event::Reveal {
             player: 9,
@@ -178,7 +219,7 @@ mod tests {
 
     #[test]
     fn moves_after_the_game_ends_are_ignored() {
-        let mut g = Game::new(7, 9, 9, 10);
+        let mut g = Game::new(7, 9, 9, 10, Mode::Coop);
         g.apply(&Event::Reveal {
             player: 0,
             x: 4,
@@ -214,6 +255,7 @@ mod tests {
             w: 9,
             h: 9,
             mines: 10,
+            mode: Mode::Coop,
         });
         assert_eq!(
             g.status(),
@@ -228,6 +270,7 @@ mod tests {
             w: 9,
             h: 9,
             mines: 10,
+            mode: Mode::Coop,
         }
     }
 
@@ -310,6 +353,7 @@ mod tests {
             w: 9,
             h: 9,
             mines: 10,
+            mode: Mode::Coop,
         };
         let p = Event::Flag {
             player: 0,
@@ -344,6 +388,7 @@ mod tests {
             w: 9,
             h: 9,
             mines: 10,
+            mode: Mode::Coop,
         };
         let reveal = Event::Reveal {
             player: 0,
@@ -374,7 +419,7 @@ mod tests {
             seed: u64,
             moves in prop::collection::vec((0u8..9, 0u8..9), 0..20),
         ) {
-            let start = Event::Start { seed, w: 9, h: 9, mines: 10 };
+            let start = Event::Start { seed, w: 9, h: 9, mines: 10, mode: Mode::Coop };
             // Fixes the mine layout before the moves under test.
             let opened = Event::Reveal { player: 0, x: 0, y: 0 };
             let evs: Vec<Event> = moves
@@ -404,7 +449,7 @@ mod tests {
             seed: u64,
             moves in prop::collection::vec((0u8..9, 0u8..9), 0..40),
         ) {
-            let mut log = vec![Event::Start { seed, w: 9, h: 9, mines: 10 }];
+            let mut log = vec![Event::Start { seed, w: 9, h: 9, mines: 10, mode: Mode::Coop }];
             for (i, &(x, y)) in moves.iter().enumerate() {
                 log.push(if i % 3 == 0 {
                     Event::Flag { player: 0, x, y }
@@ -416,5 +461,113 @@ mod tests {
             let b = Game::replay(&log).unwrap();
             prop_assert_eq!(a.hash(), b.hash());
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    fn mines_of(g: &Game) -> Vec<(u8, u8)> {
+        (0..g.board.h)
+            .flat_map(|y| (0..g.board.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.board.get(x, y).mine)
+            .collect()
+    }
+
+    /// The whole point of a flag race: a mine is a prize, not an ending.
+    #[test]
+    fn a_mine_claims_instead_of_killing() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mine = mines_of(&g)[0];
+
+        g.apply(&Event::Reveal {
+            player: 1,
+            x: mine.0,
+            y: mine.1,
+        });
+        assert_eq!(g.board.get(mine.0, mine.1).state, Reveal::Flagged);
+        assert_eq!(g.status(), Status::Playing, "a claim must not end the game");
+
+        // The same click in co-op is death, which is the difference.
+        let mut c = Game::new(7, 9, 9, 10, Mode::Coop);
+        c.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        c.apply(&Event::Reveal {
+            player: 1,
+            x: mine.0,
+            y: mine.1,
+        });
+        assert_eq!(c.status(), Status::Lost);
+    }
+
+    #[test]
+    fn a_claimed_mine_cannot_be_handed_back() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mine = mines_of(&g)[0];
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: mine.0,
+            y: mine.1,
+        });
+        // Claiming again is a no-op rather than a toggle back to hidden.
+        g.apply(&Event::Reveal {
+            player: 1,
+            x: mine.0,
+            y: mine.1,
+        });
+        assert_eq!(g.board.get(mine.0, mine.1).state, Reveal::Flagged);
+    }
+
+    #[test]
+    fn the_race_ends_when_the_last_mine_is_claimed() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mines = mines_of(&g);
+        for (i, &(x, y)) in mines.iter().enumerate() {
+            assert_eq!(g.status(), Status::Playing, "ended early at mine {i}");
+            g.apply(&Event::Reveal {
+                player: (i % 2) as u8,
+                x,
+                y,
+            });
+        }
+        assert_eq!(g.status(), Status::Won, "claiming every mine must end it");
+    }
+
+    /// Race is co-op's rules on a board each; the engine treats it the same
+    /// and the shell folds one log into two boards.
+    #[test]
+    fn race_keeps_the_ordinary_rules() {
+        let mut g = Game::new(7, 9, 9, 10, Mode::Race);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mine = mines_of(&g)[0];
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: mine.0,
+            y: mine.1,
+        });
+        assert_eq!(g.status(), Status::Lost);
     }
 }

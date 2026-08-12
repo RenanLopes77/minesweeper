@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use engine::{Board, Event, Game, Msg, Reveal, Stamped, Status, decode_msg, encode_msg};
+use engine::{Board, Event, Game, Mode, Msg, Reveal, Stamped, Status, decode_msg, encode_msg};
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
@@ -133,10 +133,16 @@ impl App {
     pub fn new(ctx: Ctx, canvas: web_sys::HtmlCanvasElement, seed: u64) -> Self {
         let (w, h, mines) = LEVELS[0];
         App {
-            game: Game::new(seed, w, h, mines),
+            game: Game::new(seed, w, h, mines, Mode::Coop),
             log: vec![Stamped {
                 seq: 0,
-                ev: Event::Start { seed, w, h, mines },
+                ev: Event::Start {
+                    seed,
+                    w,
+                    h,
+                    mines,
+                    mode: Mode::Coop,
+                },
                 at_ms: js_sys::Date::now() as u64,
             }],
             clock: 0,
@@ -454,7 +460,7 @@ mod tests {
 
     #[test]
     fn flags_left_counts_down_and_can_go_negative() {
-        let mut g = Game::new(1, 9, 9, 10);
+        let mut g = Game::new(1, 9, 9, 10, Mode::Coop);
         assert_eq!(mines_left(&g.board), 10);
 
         // Eleven flags: a full row of nine, then two on the next row.
@@ -483,6 +489,7 @@ mod tests {
                 w: 9,
                 h: 9,
                 mines: 10,
+                mode: Mode::Coop,
             },
         )
     }
@@ -634,6 +641,7 @@ mod tests {
             w: 9,
             h: 9,
             mines: 10,
+            mode: Mode::Coop,
         },
         at_ms: 0,
     };
@@ -651,6 +659,7 @@ mod tests {
                 w: 16,
                 h: 16,
                 mines: 40,
+                mode: Mode::Coop,
             },
             5_000,
         );

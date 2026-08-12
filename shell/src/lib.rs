@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use app::{App, CELL, LEVELS};
-use engine::{Event, Status};
+use engine::{Event, Mode, Status};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d as Ctx;
@@ -149,6 +149,7 @@ pub fn main() -> Result<(), JsValue> {
                     w,
                     h,
                     mines,
+                    mode: Mode::Coop,
                 },
             );
         });

@@ -1,13 +1,57 @@
+/// Which game the two of them are playing. It rides on `Start` because it has
+/// to be agreed before the first move, and `Start` is the one event both peers
+/// are guaranteed to share.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+#[repr(u8)]
+pub enum Mode {
+    /// One board, cleared together. Hitting a mine ends it for both.
+    #[default]
+    Coop = 0,
+    /// One board, but the mines are the prize: revealing one claims it for you
+    /// instead of killing you, and whoever claims more wins.
+    FlagRace = 1,
+    /// Same seed, a board each, first to clear theirs wins.
+    Race = 2,
+}
+
+impl Mode {
+    pub fn from_u8(v: u8) -> Option<Mode> {
+        match v {
+            0 => Some(Mode::Coop),
+            1 => Some(Mode::FlagRace),
+            2 => Some(Mode::Race),
+            // A mode we do not know is a peer from the future. Refusing the
+            // event is better than silently playing a different game.
+            _ => None,
+        }
+    }
+}
+
 /// A move. The event log is the game; board state is what you get by
 /// folding these over a fresh board.
 ///
-/// `player` is who made the move. The rules ignore it; the renderer uses it to
-/// say who did what, and it is part of the ordering key below.
+/// `player` is who made the move. The rules ignore it in co-op; the renderer
+/// uses it to say who did what, the other modes score by it, and it is part of
+/// the ordering key below.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Event {
-    Start { seed: u64, w: u8, h: u8, mines: u16 },
-    Reveal { player: u8, x: u8, y: u8 },
-    Flag { player: u8, x: u8, y: u8 },
+    Start {
+        seed: u64,
+        w: u8,
+        h: u8,
+        mines: u16,
+        mode: Mode,
+    },
+    Reveal {
+        player: u8,
+        x: u8,
+        y: u8,
+    },
+    Flag {
+        player: u8,
+        x: u8,
+        y: u8,
+    },
 }
 
 /// An event with its place in the total order, and when it happened.

@@ -8,7 +8,7 @@
 //! Layout, little-endian:
 //!
 //! ```text
-//! Start   0x00  seed(8)  w(1)  h(1)  mines(2)   = 13 bytes
+//! Start   0x00  seed(8)  w(1)  h(1)  mines(2)  mode(1)  = 14 bytes
 //! Reveal  0x01  player(1)  x(1)  y(1)           =  4 bytes
 //! Flag    0x02  player(1)  x(1)  y(1)           =  4 bytes
 //! ```
@@ -24,13 +24,13 @@
 //! a peer can be buggy, outdated, or hostile. Nothing here panics or indexes
 //! unchecked; malformed input returns `None` and the caller drops the message.
 
-use crate::{Event, Stamped};
+use crate::{Event, Mode, Stamped};
 
 const TAG_START: u8 = 0;
 const TAG_REVEAL: u8 = 1;
 const TAG_FLAG: u8 = 2;
 
-const START_LEN: usize = 13;
+const START_LEN: usize = 14;
 const MOVE_LEN: usize = 4;
 /// The `seq` + `at_ms` prefix on every record in a log.
 const SEQ_LEN: usize = 4;
@@ -40,12 +40,19 @@ const STAMP_LEN: usize = SEQ_LEN + AT_LEN;
 impl Event {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match *self {
-            Event::Start { seed, w, h, mines } => {
+            Event::Start {
+                seed,
+                w,
+                h,
+                mines,
+                mode,
+            } => {
                 out.push(TAG_START);
                 out.extend_from_slice(&seed.to_le_bytes());
                 out.push(w);
                 out.push(h);
                 out.extend_from_slice(&mines.to_le_bytes());
+                out.push(mode as u8);
             }
             Event::Reveal { player, x, y } => out.extend_from_slice(&[TAG_REVEAL, player, x, y]),
             Event::Flag { player, x, y } => out.extend_from_slice(&[TAG_FLAG, player, x, y]),
@@ -64,6 +71,7 @@ impl Event {
                     w: bytes[9],
                     h: bytes[10],
                     mines,
+                    mode: Mode::from_u8(bytes[13])?,
                 };
                 Some((ev, START_LEN))
             }
@@ -188,9 +196,44 @@ mod tests {
             w: 9,
             h: 16,
             mines: 40,
+            mode: Mode::Coop,
         }
         .encode(&mut v);
-        assert_eq!(v, [0, 8, 7, 6, 5, 4, 3, 2, 1, 9, 16, 40, 0]);
+        assert_eq!(v, [0, 8, 7, 6, 5, 4, 3, 2, 1, 9, 16, 40, 0, 0]);
+    }
+
+    /// The mode is the last byte of a Start, and a mode we do not know has to
+    /// be refused rather than guessed at — the two peers would be playing
+    /// different games with the same log.
+    #[test]
+    fn mode_round_trips_and_rejects_the_unknown() {
+        for mode in [Mode::Coop, Mode::FlagRace, Mode::Race] {
+            let mut v = Vec::new();
+            Event::Start {
+                seed: 1,
+                w: 9,
+                h: 9,
+                mines: 10,
+                mode,
+            }
+            .encode(&mut v);
+            assert_eq!(*v.last().unwrap(), mode as u8);
+            let (back, n) = Event::decode(&v).unwrap();
+            assert_eq!(n, START_LEN);
+            assert!(matches!(back, Event::Start { mode: m, .. } if m == mode));
+        }
+
+        let mut v = Vec::new();
+        Event::Start {
+            seed: 1,
+            w: 9,
+            h: 9,
+            mines: 10,
+            mode: Mode::Coop,
+        }
+        .encode(&mut v);
+        *v.last_mut().unwrap() = 7; // a mode from a newer peer
+        assert!(Event::decode(&v).is_none());
     }
 
     #[test]
@@ -222,6 +265,7 @@ mod tests {
                 w: 9,
                 h: 9,
                 mines: 10,
+                mode: Mode::Coop,
             },
             Event::Reveal {
                 player: 0,
@@ -253,6 +297,7 @@ mod tests {
                     w: 9,
                     h: 9,
                     mines: 10,
+                    mode: Mode::Coop,
                 },
             ),
             stamp(
@@ -412,8 +457,15 @@ mod tests {
 
     fn any_event() -> impl Strategy<Value = Event> {
         prop_oneof![
-            (any::<u64>(), any::<u8>(), any::<u8>(), any::<u16>())
-                .prop_map(|(seed, w, h, mines)| Event::Start { seed, w, h, mines }),
+            (any::<u64>(), any::<u8>(), any::<u8>(), any::<u16>()).prop_map(
+                |(seed, w, h, mines)| Event::Start {
+                    seed,
+                    w,
+                    h,
+                    mines,
+                    mode: Mode::Coop
+                }
+            ),
             (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(player, x, y)| Event::Reveal {
                 player,
                 x,
