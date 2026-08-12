@@ -75,6 +75,14 @@ fn link_of(kind: char, payload: &[u8]) -> String {
     format!("{base}#{kind}={}", b64::encode(payload))
 }
 
+/// Caps on what a paste may decode to. A real deflated SDP is under a
+/// kilobyte and inflates to a couple; anything past these is not a link, it
+/// is a decompression bomb — deflate expands up to ~1000:1, and the inflated
+/// bytes are allocated before anyone can look at them. Capping the input
+/// bounds that allocation; capping the output rejects what still slips by.
+const MAX_PACKED: usize = 16 * 1024;
+const MAX_SDP: usize = 64 * 1024;
+
 /// What a pasted string turned out to be.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Pasted {
@@ -103,7 +111,10 @@ fn shape_of(s: &str) -> Option<Pasted> {
         Some(i) => &t[i + 1..],
         None => t,
     };
-    if payload.is_empty() {
+    // 4/3 is base64's expansion, so the cap lands on the decoded bytes —
+    // and checking the text first means a bomb is refused before it is
+    // even decoded.
+    if payload.is_empty() || payload.len() > MAX_PACKED * 4 / 3 + 4 {
         return None;
     }
     Some(Pasted::Packed(b64::decode(payload)?))
@@ -114,7 +125,10 @@ async fn sdp_from_input(s: &str) -> Option<String> {
     match shape_of(s)? {
         Pasted::Sdp(sdp) => Some(sdp),
         Pasted::Packed(bytes) => match zip::inflate(&bytes).await {
-            Ok(plain) => String::from_utf8(plain).ok(),
+            // The output cap: input small enough to pass `shape_of` can
+            // still inflate to far more than any SDP has business being.
+            Ok(plain) if plain.len() <= MAX_SDP => String::from_utf8(plain).ok(),
+            Ok(_) => None,
             // Links made before the format was compressed are plain base64,
             // and a stray paste can be anything at all. Both land here.
             Err(_) => String::from_utf8(bytes)
@@ -735,5 +749,17 @@ mod tests {
     fn input_rejects_junk() {
         assert!(shape_of("").is_none());
         assert!(shape_of("hello world").is_none());
+    }
+
+    /// A paste too big to be a link is a decompression bomb's delivery, and
+    /// it has to be refused before its bytes are decoded, let alone inflated.
+    #[test]
+    fn a_paste_past_the_cap_is_refused() {
+        let big = "A".repeat(MAX_PACKED * 2);
+        assert!(shape_of(&big).is_none());
+        assert!(shape_of(&format!("#o={big}")).is_none());
+        // ...while the biggest link the cap allows still decodes.
+        let fits = "A".repeat(MAX_PACKED / 4 * 4);
+        assert!(shape_of(&fits).is_some());
     }
 }

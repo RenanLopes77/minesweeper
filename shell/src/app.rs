@@ -94,6 +94,14 @@ pub fn merge(log: &mut Vec<Stamped>, incoming: &[Stamped]) -> bool {
 /// past any real game and still refolds in microseconds.
 pub const MAX_LOG: usize = 20_000;
 
+/// Whether merging `incoming` could push the log past `MAX_LOG`. `sanitised`
+/// already caps a log we adopt wholesale; this is the same cap for the merge
+/// path, where a peer inventing moves forever would otherwise grow the log —
+/// and the refold each message triggers — without bound.
+pub fn overflows(ours: usize, incoming: usize) -> bool {
+    ours.saturating_add(incoming) > MAX_LOG
+}
+
 /// Is this event the opening of a game that is not ours? A handover always
 /// starts one: the first event of a log, a `Start` at seq 0. A restart is a
 /// move and carries seq >= 1, which is what keeps the two apart.
@@ -547,6 +555,9 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                 // Same game: this is either a move or a whole log arriving
                 // after a reconnect. Merging handles both, and handles them
                 // being partly or entirely things we already know.
+                if overflows(a.log.len(), events.len()) {
+                    return net::note("ignored a message past the log cap");
+                }
                 let new = merge(&mut a.log, &events);
                 if events.len() > 1 {
                     net::log(&format!(
@@ -1282,6 +1293,16 @@ mod tests {
             assert!(text.ends_with("press New game"), "{m:?}: {text}");
             assert!(!class.is_empty());
         }
+    }
+
+    /// The cap `remote` checks before merging: full is full, and the sum must
+    /// not wrap into "plenty of room" when a peer's count is absurd.
+    #[test]
+    fn the_log_cap_refuses_what_would_overflow_it() {
+        assert!(!overflows(0, MAX_LOG));
+        assert!(overflows(0, MAX_LOG + 1));
+        assert!(overflows(MAX_LOG, 1));
+        assert!(overflows(usize::MAX, usize::MAX));
     }
 
     #[test]
