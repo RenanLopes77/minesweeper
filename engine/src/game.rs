@@ -1,4 +1,77 @@
-use crate::{Board, Event, Mode, Reveal, Status};
+use crate::{Board, Event, Mode, Reveal, Stamped, Status};
+
+/// FNV-1a. One home for the two constants: the board hash and the log hash
+/// are compared between peers, so they must never drift apart.
+pub fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01B3)
+    })
+}
+
+/// The mode the current board is played under: whatever the last `Start` said.
+/// It is in the log, so both peers read the same answer.
+pub fn mode_of(log: &[Stamped]) -> Mode {
+    log.iter()
+        .rev()
+        .find_map(|s| match s.ev {
+            Event::Start { mode, .. } => Some(mode),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// A race is one log folded into two boards: each player's moves land only on
+/// their own copy, and `Start` lands on both because it is the shared deal.
+///
+/// Returns my board, theirs, whoever finished first, and which event settled
+/// it — all in one pass, because "who won" is a question about order.
+pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>, Option<usize>) {
+    let blank = || match events.first() {
+        Some(&Event::Start {
+            seed,
+            w,
+            h,
+            mines,
+            mode,
+        }) => Game::new(seed, w, h, mines, mode),
+        _ => Game::new(0, 9, 9, 10, Mode::Race),
+    };
+    let (mut mine, mut theirs) = (blank(), blank());
+    let (mut winner, mut ended) = (None, None);
+
+    for (i, ev) in events.iter().enumerate().skip(1) {
+        match *ev {
+            Event::Start { .. } => {
+                mine.apply(ev);
+                theirs.apply(ev);
+                winner = None;
+                ended = None;
+            }
+            Event::Reveal { player, .. } | Event::Flag { player, .. } => {
+                let board = if player == me { &mut mine } else { &mut theirs };
+                board.apply(ev);
+                if winner.is_none() {
+                    // First board home wins; stepping on a mine hands it over.
+                    if mine.status() == Status::Won || theirs.status() == Status::Lost {
+                        winner = Some(me);
+                    } else if theirs.status() == Status::Won || mine.status() == Status::Lost {
+                        winner = Some(1 - me);
+                    }
+                    if winner.is_some() {
+                        ended = Some(i);
+                    }
+                }
+            }
+        }
+    }
+    (mine, theirs, winner, ended)
+}
+
+/// The log both peers hold, hashed. In a race their boards are meant to
+/// differ, so the agreement worth checking is the log itself.
+pub fn log_hash(log: &[Stamped]) -> u64 {
+    fnv1a(crate::encode_log(log))
+}
 
 pub struct Game {
     pub board: Board,
@@ -198,11 +271,8 @@ impl Game {
     ///
     /// Bit budget per cell: mine 1, adj 4 (0..=8), state 2 (0..=2) = 7.
     pub fn hash(&self) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut mix = |byte: u8| {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01B3);
-        };
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.board.cells().len() + 16);
+        let mut mix = |byte: u8| bytes.push(byte);
 
         mix(self.board.w);
         mix(self.board.h);
@@ -218,7 +288,7 @@ impl Game {
         for c in self.board.cells() {
             mix((c.mine as u8) | (c.adj << 1) | ((c.state as u8) << 5));
         }
-        h
+        fnv1a(bytes)
     }
 }
 

@@ -76,11 +76,9 @@
   <canvas id="board" width="576" height="576"></canvas>
   <div id="controls">
     <button id="flag" type="button">Flag mode: off</button>
-    <select id="level">
-      <option>Beginner — 9x9, 10 mines</option>
-      <option>Intermediate — 16x16, 40 mines</option>
-      <option>Expert — 30x16, 99 mines</option>
-    </select>
+    <!-- Filled from app::LEVELS at startup, so the labels and the numbers
+         they describe cannot drift apart. -->
+    <select id="level"></select>
     <!-- Filled from engine::Mode at startup: the nth option *is* the nth
          variant, and that is now enforced by the code rather than by this
          comment. The mode travels on Start, so both peers play the same game. -->

@@ -9,7 +9,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use engine::{Board, Event, Game, Mode, Msg, Reveal, Stamped, Status, decode_msg, encode_msg};
+use engine::{
+    Board, Event, Game, Mode, Msg, Reveal, Stamped, Status, decode_msg, encode_msg, mode_of,
+    race_fold,
+};
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
@@ -20,9 +23,14 @@ pub const CELL: f64 = 32.0;
 /// so CSS can shrink it to the viewport without softening the digits.
 pub const SCALE: f64 = 2.0;
 
-/// `(w, h, mines)`, in the order the `#level` options appear. The classic
-/// three; anything else is a number nobody has an intuition for.
-pub const LEVELS: [(u8, u8, u16); 3] = [(9, 9, 10), (16, 16, 40), (30, 16, 99)];
+/// `(w, h, mines, name)`. The picker is built from this, so the label and the
+/// numbers cannot drift apart — the page used to spell them out separately.
+/// The classic three; anything else is a number nobody has an intuition for.
+pub const LEVELS: [(u8, u8, u16, &str); 3] = [
+    (9, 9, 10, "Beginner"),
+    (16, 16, 40, "Intermediate"),
+    (30, 16, 99, "Expert"),
+];
 
 /// One colour each. Player 0 hosts, player 1 joins.
 pub const PLAYERS: [(&str, &str); 2] = [("#c0392b", "red"), ("#2b6fc8", "blue")];
@@ -156,63 +164,12 @@ pub fn clock_window(log: &[Stamped], ended_at: Option<u64>) -> (Option<u64>, Opt
     (started, started.and(ended_at))
 }
 
-/// The mode the current board is being played under: whatever the last
-/// `Start` said. It is in the log, so both peers read the same answer.
-pub fn mode_of(log: &[Stamped]) -> Mode {
-    log.iter()
-        .rev()
-        .find_map(|s| match s.ev {
-            Event::Start { mode, .. } => Some(mode),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// A race is one log folded into two boards: each player's moves land only on
-/// their own copy, and `Start` lands on both because it is the shared deal.
-///
-/// Returns my board, theirs, and whoever finished first — decided in this one
-/// pass, because "who won" is a question about order, not about final state.
-pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>, Option<usize>) {
-    let blank = || Game::replay(&events[..1]).unwrap_or(Game::new(0, 9, 9, 10, Mode::Race));
-    let (mut mine, mut theirs) = (blank(), blank());
-    let (mut winner, mut ended) = (None, None);
-
-    for (i, ev) in events.iter().enumerate().skip(1) {
-        match *ev {
-            Event::Start { .. } => {
-                mine.apply(ev);
-                theirs.apply(ev);
-                winner = None;
-                ended = None;
-            }
-            Event::Reveal { player, .. } | Event::Flag { player, .. } => {
-                let board = if player == me { &mut mine } else { &mut theirs };
-                board.apply(ev);
-                if winner.is_none() {
-                    // First board home wins; stepping on a mine hands it over.
-                    if mine.status() == Status::Won || theirs.status() == Status::Lost {
-                        winner = Some(me);
-                    } else if theirs.status() == Status::Won || mine.status() == Status::Lost {
-                        winner = Some(1 - me);
-                    }
-                    if winner.is_some() {
-                        ended = Some(i);
-                    }
-                }
-            }
-        }
-    }
-    (mine, theirs, winner, ended)
-}
-
 /// Whether a peer's report means the two of us have actually parted company.
 ///
 /// Only comparable at the same point in the log: a different count means one
 /// side is simply behind, which happens constantly and is not a fault. That
-/// gate is also the failure mode worth guarding — anything that makes the two
-/// counts differ forever turns detection off for the rest of the session
-/// without a word.
+/// gate is also the failure worth guarding — anything that makes the counts
+/// differ forever turns detection off for the session without a word.
 pub fn is_desync(theirs_count: u32, theirs_hash: u64, ours_len: usize, ours_hash: u64) -> bool {
     theirs_count as usize == ours_len && theirs_hash != ours_hash
 }
@@ -222,8 +179,6 @@ pub fn is_desync(theirs_count: u32, theirs_hash: u64, ours_len: usize, ours_hash
 /// Both sides run this over the same pair of logs, so they agree without
 /// negotiating: a game with moves in it beats an untouched deal, and a tie is
 /// broken by the deals themselves so the answer cannot depend on who asked.
-/// Deciding by "who pressed Host" instead threw away an in-progress game
-/// whenever the newcomer happened to be the one hosting.
 pub fn theirs_survives(ours: &[Stamped], theirs: &[Stamped]) -> bool {
     let moves = |l: &[Stamped]| {
         l.iter()
@@ -249,19 +204,16 @@ pub fn seat_in(log: &[Stamped], is_host: bool) -> u8 {
     match (played(0), played(1)) {
         (true, false) => 1,
         (false, true) => 0,
-        // Nobody has moved, or both have: fall back to what the connection says.
         _ => u8::from(!is_host),
     }
 }
 
 /// Which seat we take on a connection.
 ///
-/// Identity cannot simply be "whoever pressed Host is player 0": after a drop
-/// either side may host, and a peer that changes seat mid-game takes its own
-/// past moves with it — in a race its board and the opponent's swap wholesale,
-/// and in a flag race the two scores trade places. So a player who has already
-/// moved in *this* log keeps the seat those moves were made from, and only a
-/// player with nothing at stake takes the seat the connection implies.
+/// Identity cannot be "whoever pressed Host is player 0": after a drop either
+/// side may host, and a peer that changes seat mid-game takes its own past
+/// moves with it — in a race its board and the opponent's swap wholesale, in a
+/// flag race the two scores trade places.
 pub fn seat(current: u8, is_host: bool, log: &[Stamped]) -> u8 {
     let ours = log.iter().any(|s| match s.ev {
         Event::Reveal { player, .. } | Event::Flag { player, .. } => player == current,
@@ -271,6 +223,54 @@ pub fn seat(current: u8, is_host: bool, log: &[Stamped]) -> u8 {
         (true, _) => current,
         (false, true) => 0,
         (false, false) => 1,
+    }
+}
+
+/// What to say once a game is decided, and which colour to say it in.
+///
+/// Pure, because the eight ways a game can end were otherwise reachable only
+/// from a browser — and the solo ones not even there, since every end-to-end
+/// test connects first.
+pub fn verdict(
+    mode: Mode,
+    status: Status,
+    winner: Option<u8>,
+    me: u8,
+    scores: [u32; 2],
+    solo: bool,
+) -> (String, &'static str) {
+    let done = |head: String, class| (format!("{head} — press New game"), class);
+    match mode {
+        // A race is decided by who got home first, not by the board in front
+        // of you: you can finish and still have lost.
+        Mode::Race => match winner {
+            Some(w) if w == me => done("YOU WIN".into(), "win"),
+            Some(_) if status == Status::Lost => {
+                let head = if solo {
+                    "BOOM"
+                } else {
+                    "BOOM — the race is theirs"
+                };
+                done(head.into(), "lose")
+            }
+            Some(_) => done("THEY GOT THERE FIRST".into(), "lose"),
+            None => (String::new(), ""),
+        },
+        Mode::FlagRace if status != Status::Playing => {
+            let (mine, theirs) = (scores[me as usize], scores[1 - me as usize]);
+            match (solo, mine.cmp(&theirs)) {
+                (true, _) => done(format!("all {mine} mines claimed"), "win"),
+                (_, std::cmp::Ordering::Greater) => done(format!("YOU WIN {mine}–{theirs}"), "win"),
+                (_, std::cmp::Ordering::Less) => done(format!("YOU LOSE {mine}–{theirs}"), "lose"),
+                _ => done(format!("A DRAW {mine}–{theirs}"), "win"),
+            }
+        }
+        Mode::Coop => match status {
+            Status::Won => done("YOU WIN".into(), "win"),
+            Status::Lost => done("BOOM".into(), "lose"),
+            Status::Playing => (String::new(), ""),
+        },
+        _ => (String::new(), ""),
     }
 }
 
@@ -310,7 +310,7 @@ pub type Shared = Rc<RefCell<App>>;
 
 impl App {
     pub fn new(ctx: Ctx, canvas: web_sys::HtmlCanvasElement, seed: u64) -> Self {
-        let (w, h, mines) = LEVELS[0];
+        let (w, h, mines, _) = LEVELS[0];
         App {
             game: Game::new(seed, w, h, mines, Mode::Coop),
             log: vec![Stamped {
@@ -378,12 +378,7 @@ impl App {
         if mode_of(&self.log) != Mode::Race {
             return self.game.hash();
         }
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in engine::encode_log(&self.log) {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01B3);
-        }
-        h
+        engine::log_hash(&self.log)
     }
 
     /// Everything that has to happen after the board changes: repaint, and
@@ -410,51 +405,14 @@ impl App {
         else {
             return;
         };
-        let solo = self.chan.is_none();
-        let (text, class) = match mode_of(&self.log) {
-            // A race is decided by who got home first, not by the state of
-            // the board in front of you: you can finish and still have lost.
-            Mode::Race => match self.winner {
-                Some(w) if w == self.player => ("YOU WIN — press New game".into(), "win"),
-                // Losing a race two ways: too slow, or too bold.
-                Some(_) if self.game.status() == Status::Lost => {
-                    let msg = if solo {
-                        "BOOM — press New game"
-                    } else {
-                        "BOOM — the race is theirs. Press New game"
-                    };
-                    (msg.into(), "lose")
-                }
-                Some(_) => ("THEY GOT THERE FIRST — press New game".into(), "lose"),
-                None => (String::new(), ""),
-            },
-            Mode::FlagRace => match self.game.status() {
-                Status::Playing => (String::new(), ""),
-                _ => {
-                    let [red, blue] = self.game.scores();
-                    let mine = if self.player == 0 { red } else { blue };
-                    let theirs = if self.player == 0 { blue } else { red };
-                    match (solo, mine.cmp(&theirs)) {
-                        // `mine`, not `red`: a joiner left alone after a drop
-                        // keeps player 1, and would be shown its opponent's
-                        // score as its own.
-                        (true, _) => (format!("all {mine} mines claimed — press New game"), "win"),
-                        (_, std::cmp::Ordering::Greater) => {
-                            (format!("YOU WIN {mine}–{theirs} — press New game"), "win")
-                        }
-                        (_, std::cmp::Ordering::Less) => {
-                            (format!("YOU LOSE {mine}–{theirs} — press New game"), "lose")
-                        }
-                        _ => (format!("A DRAW {mine}–{theirs} — press New game"), "win"),
-                    }
-                }
-            },
-            Mode::Coop => match self.game.status() {
-                Status::Playing => (String::new(), ""),
-                Status::Won => ("YOU WIN — press New game".into(), "win"),
-                Status::Lost => ("BOOM — press New game".into(), "lose"),
-            },
-        };
+        let (text, class) = verdict(
+            mode_of(&self.log),
+            self.game.status(),
+            self.winner,
+            self.player,
+            self.game.scores(),
+            self.chan.is_none(),
+        );
         el.set_text_content(Some(&text));
         el.set_class_name(class);
     }
@@ -689,7 +647,13 @@ impl App {
                 if c.state == Reveal::Flagged {
                     // The flag is whoever planted it, so a disagreement about
                     // a cell is visible rather than argued about.
-                    let p = *who.owner.get(&(x, y)).unwrap_or(&0);
+                    // In a race this board is only ever yours, so the flags on
+                    // it are too — colouring them by the log would paint your
+                    // opponent's moves onto your own board.
+                    let p = match mode_of(&self.log) {
+                        Mode::Race => self.player,
+                        _ => *who.owner.get(&(x, y)).unwrap_or(&0),
+                    };
                     ctx.set_fill_style_str(PLAYERS[p as usize % PLAYERS.len()].0);
                     ctx.fill_rect(px + 11.0, py + 8.0, 11.0, 13.0);
 
@@ -1090,7 +1054,7 @@ mod tests {
     /// with no error and no DESYNC, because the counts would never match.
     #[test]
     fn every_difficulty_is_an_event_a_peer_will_accept() {
-        for (w, h, mines) in LEVELS {
+        for (w, h, mines, _) in LEVELS {
             let deal = Event::Start {
                 seed: 1,
                 w,
@@ -1268,6 +1232,56 @@ mod tests {
         assert!(!is_desync(9, 0xAAAA, 3, 0xBBBB));
         // A count no log could reach must not panic on the cast.
         assert!(!is_desync(u32::MAX, 0xAAAA, 3, 0xBBBB));
+    }
+
+    /// Eight ways a game can end, none of them reachable from a native test
+    /// before this was pulled out of the DOM write — and the solo ones not
+    /// reachable from the browser tests either, since those always connect.
+    #[test]
+    fn every_ending_says_the_right_thing() {
+        use Status::{Lost, Playing, Won};
+        let (red, blue) = (0, 1);
+
+        // Co-op: the board decides, and an unfinished game says nothing.
+        assert_eq!(verdict(Mode::Coop, Playing, None, red, [0, 0], true).1, "");
+        assert!(
+            verdict(Mode::Coop, Won, None, red, [0, 0], true)
+                .0
+                .starts_with("YOU WIN")
+        );
+        assert!(
+            verdict(Mode::Coop, Lost, None, red, [0, 0], true)
+                .0
+                .starts_with("BOOM")
+        );
+
+        // Flag race: the score decides, from the reader's own side.
+        let score = |me, s: [u32; 2]| verdict(Mode::FlagRace, Won, None, me, s, false).0;
+        assert!(score(red, [7, 3]).starts_with("YOU WIN 7–3"));
+        assert!(score(blue, [7, 3]).starts_with("YOU LOSE 3–7"));
+        assert!(score(red, [5, 5]).starts_with("A DRAW 5–5"));
+        // Alone, there is nobody to beat — and a joiner left alone is still
+        // player 1, so it must read its own column.
+        assert!(
+            verdict(Mode::FlagRace, Won, None, blue, [3, 7], true)
+                .0
+                .starts_with("all 7 mines claimed")
+        );
+
+        // Race: the verdict decides, and losing has two flavours.
+        let race = |w, st, solo| verdict(Mode::Race, st, w, red, [0, 0], solo).0;
+        assert!(race(Some(red), Playing, false).starts_with("YOU WIN"));
+        assert!(race(Some(blue), Playing, false).starts_with("THEY GOT THERE FIRST"));
+        assert!(race(Some(blue), Lost, false).starts_with("BOOM — the race is theirs"));
+        assert!(race(Some(blue), Lost, true).starts_with("BOOM — press"));
+        assert_eq!(race(None, Playing, false), "");
+
+        // Every ending tells you how to start another.
+        for m in [Mode::Coop, Mode::FlagRace, Mode::Race] {
+            let (text, class) = verdict(m, Won, Some(red), red, [1, 0], false);
+            assert!(text.ends_with("press New game"), "{m:?}: {text}");
+            assert!(!class.is_empty());
+        }
     }
 
     #[test]

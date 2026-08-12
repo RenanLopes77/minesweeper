@@ -39,10 +39,10 @@ over. The layout cannot depend on who opened where, so mines are dealt around
 the **centre cell** rather than around your first click: the middle is the safe
 opening for both of you, and everywhere else is an honest risk.
 
-One log still carries all of it. A race just folds that log twice — your events
-onto your board, theirs onto theirs — which is also why the two peers compare a
-hash of the *log* in that mode instead of the board: their boards are supposed
-to differ.
+One log still carries all of it. A race just folds that log twice — `race_fold`
+in the engine, your events onto your board and theirs onto theirs — which is
+also why the two peers compare a hash of the *log* in that mode instead of the
+board: their boards are supposed to differ.
 
 ## Design
 

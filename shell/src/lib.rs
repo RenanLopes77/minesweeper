@@ -97,10 +97,12 @@ pub fn main() -> Result<(), JsValue> {
                 let Some((x, y)) = cell_at(&c, &e, w, h) else {
                     return;
                 };
-                let ev = if e.button() == 2 || shared.borrow().flag_mode {
-                    Event::Flag { player, x, y }
-                } else {
-                    Event::Reveal { player, x, y }
+                // Left reveals, right flags. A middle click used to reveal,
+                // which is a surprising way to lose a game.
+                let ev = match (e.button(), shared.borrow().flag_mode) {
+                    (2, _) | (0, true) => Event::Flag { player, x, y },
+                    (0, false) => Event::Reveal { player, x, y },
+                    _ => return,
                 };
                 app::local(&shared, ev);
             });
@@ -146,6 +148,11 @@ pub fn main() -> Result<(), JsValue> {
             .dyn_into()?;
         // Built here rather than written out in the page: the picker's order
         // is the wire's order, and a mode added to the enum appears by itself.
+        for (w, h, mines, name) in LEVELS {
+            let opt = doc.create_element("option")?;
+            opt.set_text_content(Some(&format!("{name} — {w}x{h}, {mines} mines")));
+            level.append_child(&opt)?;
+        }
         for mode in Mode::ALL {
             let opt = doc.create_element("option")?;
             opt.set_text_content(Some(mode.label()));
@@ -154,7 +161,7 @@ pub fn main() -> Result<(), JsValue> {
         let shared = shared.clone();
         let restart = Closure::<dyn FnMut()>::new(move || {
             let i = (level.selected_index().max(0) as usize).min(LEVELS.len() - 1);
-            let (w, h, mines) = LEVELS[i];
+            let (w, h, mines, _) = LEVELS[i];
             // The picker's order is engine::Mode's order; anything else the
             // DOM could hand us falls back to co-op rather than guessing.
             let mode = Mode::from_u8(mode_sel.selected_index().max(0) as u8).unwrap_or_default();
