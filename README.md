@@ -193,6 +193,10 @@ consent checks time out — up to about half a minute. The status line says the
 other player has gone quiet as soon as the state wobbles, rather than leaving
 a board that has silently stopped moving.
 
+**The clock stops at the move that ended the game**, not at the last event in
+the log — peers keep sending moves until they hear the bad news, and those
+merge in behind the losing click.
+
 **The running clock is only as good as the two devices' clocks.** It counts
 from the timestamp on the first reveal, which was written by whoever made that
 move, so peers whose system clocks disagree will disagree by that much while

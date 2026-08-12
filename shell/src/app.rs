@@ -126,6 +126,9 @@ pub struct App {
     /// whoever got home first. Both are `None` in the shared-board modes.
     foe: Option<Game>,
     winner: Option<u8>,
+    /// When the move that ended this game was made, so the clock freezes
+    /// there rather than at whatever arrived afterwards.
+    ended_at: Option<u64>,
     ctx: Ctx,
     canvas: web_sys::HtmlCanvasElement,
 }
@@ -138,9 +141,10 @@ pub struct App {
 /// really begins: mines are not placed until then. Only events after the last
 /// `Start` count, because a restart leaves the old moves in the log.
 ///
-/// `over` comes from the engine rather than the log, so the stop time is the
-/// last event we folded — the move that won or lost it.
-pub fn clock_window(log: &[Stamped], over: bool) -> (Option<u64>, Option<u64>) {
+/// `ended_at` is the timestamp of the move that actually finished the game.
+/// It cannot be read off the end of the log: peers keep sending moves until
+/// they hear the bad news, and those merge in behind the losing click.
+pub fn clock_window(log: &[Stamped], ended_at: Option<u64>) -> (Option<u64>, Option<u64>) {
     let from = log
         .iter()
         .rposition(|s| matches!(s.ev, Event::Start { .. }))
@@ -149,11 +153,7 @@ pub fn clock_window(log: &[Stamped], over: bool) -> (Option<u64>, Option<u64>) {
         .iter()
         .find(|s| matches!(s.ev, Event::Reveal { .. }))
         .map(|s| s.at_ms);
-    let stopped = match (over, started) {
-        (true, Some(_)) => log.last().map(|s| s.at_ms),
-        _ => None,
-    };
-    (started, stopped)
+    (started, started.and(ended_at))
 }
 
 /// The mode the current board is being played under: whatever the last
@@ -173,17 +173,18 @@ pub fn mode_of(log: &[Stamped]) -> Mode {
 ///
 /// Returns my board, theirs, and whoever finished first — decided in this one
 /// pass, because "who won" is a question about order, not about final state.
-pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
+pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>, Option<usize>) {
     let blank = || Game::replay(&events[..1]).unwrap_or(Game::new(0, 9, 9, 10, Mode::Race));
     let (mut mine, mut theirs) = (blank(), blank());
-    let mut winner = None;
+    let (mut winner, mut ended) = (None, None);
 
-    for ev in &events[1.min(events.len())..] {
+    for (i, ev) in events.iter().enumerate().skip(1) {
         match *ev {
             Event::Start { .. } => {
                 mine.apply(ev);
                 theirs.apply(ev);
                 winner = None;
+                ended = None;
             }
             Event::Reveal { player, .. } | Event::Flag { player, .. } => {
                 let board = if player == me { &mut mine } else { &mut theirs };
@@ -195,11 +196,14 @@ pub fn race_fold(events: &[Event], me: u8) -> (Game, Game, Option<u8>) {
                     } else if theirs.status() == Status::Won || mine.status() == Status::Lost {
                         winner = Some(1 - me);
                     }
+                    if winner.is_some() {
+                        ended = Some(i);
+                    }
                 }
             }
         }
     }
-    (mine, theirs, winner)
+    (mine, theirs, winner, ended)
 }
 
 /// Whether a peer's report means the two of us have actually parted company.
@@ -326,6 +330,7 @@ impl App {
             chan: None,
             foe: None,
             winner: None,
+            ended_at: None,
             ctx,
             canvas,
         }
@@ -351,16 +356,18 @@ impl App {
     fn rebuild(&mut self) {
         let events: Vec<Event> = self.log.iter().map(|s| s.ev).collect();
         if mode_of(&self.log) == Mode::Race {
-            let (mine, theirs, winner) = race_fold(&events, self.player);
+            let (mine, theirs, winner, ended) = race_fold(&events, self.player);
             self.game = mine;
             self.foe = Some(theirs);
             self.winner = winner;
+            self.ended_at = ended.and_then(|i| self.log.get(i)).map(|s| s.at_ms);
             return;
         }
         self.foe = None;
         self.winner = None;
-        if let Some(g) = Game::replay(&events) {
+        if let Some((g, ended)) = Game::replay_marking_end(&events) {
             self.game = g;
+            self.ended_at = ended.and_then(|i| self.log.get(i)).map(|s| s.at_ms);
         }
     }
 
@@ -459,7 +466,7 @@ impl App {
     /// time is subtracted entirely out of the log, so it is the same number
     /// on both screens — and that is the one worth being right.
     fn seconds(&self) -> u32 {
-        let (Some(start), stop) = clock_window(&self.log, self.over()) else {
+        let (Some(start), stop) = clock_window(&self.log, self.ended_at) else {
             return 0;
         };
         let now = stop.unwrap_or_else(|| js_sys::Date::now() as u64);
@@ -869,7 +876,7 @@ mod tests {
     }
 
     /// The clock runs for the board in front of you, not for the log — and it
-    /// is read out of the log, so a peer who joins late reads the same start.
+    /// stops at the move that ended the game, not at whatever arrived after.
     #[test]
     fn the_clock_is_read_from_the_log() {
         let reveal = at(
@@ -881,7 +888,7 @@ mod tests {
             },
             10_000,
         );
-        let flag = at(
+        let ending = at(
             2,
             Event::Flag {
                 player: 1,
@@ -890,22 +897,33 @@ mod tests {
             },
             42_000,
         );
+        // A move made by a peer who had not yet heard the bad news.
+        let straggler = at(
+            3,
+            Event::Flag {
+                player: 1,
+                x: 6,
+                y: 6,
+            },
+            99_000,
+        );
 
         // Nothing opened yet: stopped, and no start to count from.
-        assert_eq!(clock_window(&[start(1)], false), (None, None));
+        assert_eq!(clock_window(&[start(1)], None), (None, None));
         // Running: it began at the first reveal and has no end.
         assert_eq!(
-            clock_window(&[start(1), reveal, flag], false),
+            clock_window(&[start(1), reveal, ending], None),
             (Some(10_000), None)
         );
-        // Over: the end is the move that ended it — 32 seconds of game.
+        // Over: the clock stops at the move that ended it — 32 seconds of
+        // game — however many stragglers land behind it.
         assert_eq!(
-            clock_window(&[start(1), reveal, flag], true),
+            clock_window(&[start(1), reveal, ending, straggler], Some(42_000)),
             (Some(10_000), Some(42_000))
         );
         // New game: the old reveal is still in the log and must not count.
         assert_eq!(
-            clock_window(&[start(1), reveal, at(3, START2.ev, 99_000)], false),
+            clock_window(&[start(1), reveal, at(3, START2.ev, 99_000)], None),
             (None, None)
         );
     }
@@ -1183,8 +1201,8 @@ mod tests {
         ];
         let events: Vec<Event> = log.iter().map(|s| s.ev).collect();
 
-        let (mine0, theirs0, w0) = race_fold(&events, 0);
-        let (mine1, theirs1, w1) = race_fold(&events, 1);
+        let (mine0, theirs0, w0, _) = race_fold(&events, 0);
+        let (mine1, theirs1, w1, _) = race_fold(&events, 1);
         assert_eq!(
             mine0.hash(),
             theirs1.hash(),

@@ -136,6 +136,39 @@ impl Game {
         self.claims
     }
 
+    /// Replays, and says which event ended the game.
+    ///
+    /// The last event in a log is not the one that ended it: peers keep
+    /// sending moves until they hear the bad news, and those arrive, merge,
+    /// and are then ignored by `apply`. Anything reading the log for a
+    /// finishing time has to know where the game actually stopped.
+    pub fn replay_marking_end(events: &[Event]) -> Option<(Game, Option<usize>)> {
+        let Event::Start {
+            seed,
+            w,
+            h,
+            mines,
+            mode,
+        } = *events.first()?
+        else {
+            return None;
+        };
+        let mut g = Game::new(seed, w, h, mines, mode);
+        let mut ended = None;
+        for (i, ev) in events.iter().enumerate().skip(1) {
+            g.apply(ev);
+            match (ended, g.status()) {
+                (None, Status::Playing) => {}
+                // A restart puts the game back in play, so the ending it had
+                // before is no longer the ending.
+                (Some(_), Status::Playing) => ended = None,
+                (None, _) => ended = Some(i),
+                (Some(_), _) => {}
+            }
+        }
+        Some((g, ended))
+    }
+
     pub fn replay(events: &[Event]) -> Option<Game> {
         let Event::Start {
             seed,
@@ -1026,5 +1059,105 @@ mod hash_covers_the_deal {
             blue.hash(),
             "the same board with the point on the other side hashed the same"
         );
+    }
+}
+
+#[cfg(test)]
+mod where_the_game_ended {
+    use super::*;
+
+    fn deal() -> Event {
+        Event::Start {
+            seed: 7,
+            w: 9,
+            h: 9,
+            mines: 10,
+            mode: Mode::Coop,
+        }
+    }
+
+    /// The log keeps growing after the game stops: a peer that has not yet
+    /// heard the bad news sends more moves, and they merge in behind the one
+    /// that ended it. The finishing time is the losing move, not the last.
+    #[test]
+    fn the_ending_move_is_named_not_the_last_one() {
+        let mut probe = Game::new(7, 9, 9, 10, Mode::Coop);
+        probe.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mine = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .find(|&(x, y)| probe.board.get(x, y).mine)
+            .unwrap();
+
+        let log = vec![
+            deal(),
+            Event::Reveal {
+                player: 0,
+                x: 4,
+                y: 4,
+            },
+            Event::Reveal {
+                player: 0,
+                x: mine.0,
+                y: mine.1,
+            }, // index 2 — this is the end
+            Event::Flag {
+                player: 1,
+                x: 0,
+                y: 0,
+            }, // a straggler, ignored by the rules
+        ];
+        let (g, ended) = Game::replay_marking_end(&log).unwrap();
+        assert_eq!(g.status(), Status::Lost);
+        assert_eq!(ended, Some(2), "the straggler was mistaken for the ending");
+    }
+
+    #[test]
+    fn a_game_still_running_has_no_ending() {
+        let log = vec![
+            deal(),
+            Event::Reveal {
+                player: 0,
+                x: 4,
+                y: 4,
+            },
+        ];
+        assert_eq!(Game::replay_marking_end(&log).unwrap().1, None);
+    }
+
+    /// A restart puts the game back in play, so the ending it had is not one.
+    #[test]
+    fn a_restart_clears_the_ending() {
+        let mut probe = Game::new(7, 9, 9, 10, Mode::Coop);
+        probe.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        let mine = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .find(|&(x, y)| probe.board.get(x, y).mine)
+            .unwrap();
+
+        let log = vec![
+            deal(),
+            Event::Reveal {
+                player: 0,
+                x: 4,
+                y: 4,
+            },
+            Event::Reveal {
+                player: 0,
+                x: mine.0,
+                y: mine.1,
+            },
+            deal(),
+        ];
+        let (g, ended) = Game::replay_marking_end(&log).unwrap();
+        assert_eq!(g.status(), Status::Playing);
+        assert_eq!(ended, None);
     }
 }
