@@ -644,15 +644,14 @@ mod flag_race_endgame {
         let cells: Vec<(u8, u8)> = (0..9u8)
             .flat_map(|y| (0..9u8).map(move |x| (x, y)))
             .collect();
+        // Deciding which cells to click has to finish before clicking starts:
+        // the filter borrows the board that `apply` wants to mutate.
+        let (mines, safe): (Vec<(u8, u8)>, Vec<(u8, u8)>) =
+            cells.iter().partition(|&&(x, y)| g.board.get(x, y).mine);
         // Every safe cell first: this is what makes the board call itself won.
-        for &(x, y) in cells.iter().filter(|&&(x, y)| !g.board.get(x, y).mine) {
+        for (x, y) in safe {
             g.apply(&Event::Reveal { player: 0, x, y });
         }
-        let mines: Vec<(u8, u8)> = cells
-            .iter()
-            .copied()
-            .filter(|&(x, y)| g.board.get(x, y).mine)
-            .collect();
         for (i, &(x, y)) in mines.iter().enumerate() {
             g.apply(&Event::Reveal {
                 player: (i % 2) as u8,
