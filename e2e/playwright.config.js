@@ -6,7 +6,12 @@ import { defineConfig } from '@playwright/test';
 //   BASE_URL=https://renanlopes77.github.io/minesweeper/ npx playwright test
 // Production is the only place the real STUN path, HTTPS clipboard rules and
 // GitHub Pages' own caching are exercised.
-const LIVE = process.env.BASE_URL;
+// Normalise: a missing trailing slash makes new URL('.', base) drop the
+// project path (…/minesweeper -> account root), and an empty string is not a
+// site — both fall back to the local server rather than failing obscurely.
+const LIVE = process.env.BASE_URL
+  ? process.env.BASE_URL.replace(/\/?$/, '/')
+  : undefined;
 
 export default defineConfig({
   testDir: '.',
