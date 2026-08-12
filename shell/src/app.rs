@@ -577,8 +577,11 @@ impl App {
         }
 
         // Where the other player last played — the closest thing to seeing
-        // them without streaming a cursor over the channel.
-        for (i, spot) in who.last.iter().enumerate() {
+        // them without streaming a cursor over the channel. Not in a race:
+        // their last move happened on their own board, so drawing it on
+        // yours would be pointing at the wrong square.
+        let show_peer = mode_of(&self.log) != Mode::Race;
+        for (i, spot) in who.last.iter().enumerate().filter(|_| show_peer) {
             let Some(&(x, y)) = spot.as_ref() else {
                 continue;
             };

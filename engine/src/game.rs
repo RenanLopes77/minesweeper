@@ -46,7 +46,16 @@ impl Game {
                 // click can be guaranteed safe. Both peers derive the same
                 // layout because both have this event in their log.
                 if !self.placed {
-                    self.board.place_mines(self.seed, (x, y));
+                    // Two racers hold two boards that have to be the *same*
+                    // board, so the layout cannot depend on who clicked where
+                    // first. The centre is the agreed safe opening instead;
+                    // every other first click is a real risk, equally, for
+                    // both of them.
+                    let opening = match self.mode {
+                        Mode::Race => (self.board.w / 2, self.board.h / 2),
+                        _ => (x, y),
+                    };
+                    self.board.place_mines(self.seed, opening);
                     self.placed = true;
                 }
                 // In a flag race the mines are the prize, not the punishment:
@@ -569,5 +578,45 @@ mod mode_tests {
             y: mine.1,
         });
         assert_eq!(g.status(), Status::Lost);
+    }
+}
+
+#[cfg(test)]
+mod race_layout_tests {
+    use super::*;
+
+    fn layout(first: (u8, u8), mode: Mode) -> Vec<bool> {
+        let mut g = Game::new(42, 9, 9, 10, mode);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: first.0,
+            y: first.1,
+        });
+        g.board.cells().iter().map(|c| c.mine).collect()
+    }
+
+    /// The two racers each open somewhere different, and must still be playing
+    /// the same board — otherwise it is two solitaire games with one clock.
+    #[test]
+    fn a_race_deals_both_players_the_same_mines() {
+        assert_eq!(
+            layout((0, 0), Mode::Race),
+            layout((8, 8), Mode::Race),
+            "the race layout moved with the first click"
+        );
+        // Co-op keeps first-click safety, so its layout does depend on it.
+        assert_ne!(layout((0, 0), Mode::Coop), layout((8, 8), Mode::Coop));
+    }
+
+    #[test]
+    fn the_centre_is_the_safe_opening_in_a_race() {
+        let mut g = Game::new(42, 9, 9, 10, Mode::Race);
+        g.apply(&Event::Reveal {
+            player: 0,
+            x: 4,
+            y: 4,
+        });
+        assert!(!g.board.get(4, 4).mine, "the agreed opening was a mine");
+        assert_eq!(g.status(), Status::Playing);
     }
 }
