@@ -161,8 +161,11 @@ number.
   it and Beginner does not stretch to match. Long-press flagging is still
   unbuilt; the toggle covers it without a timer.
 
-  30 columns on a phone is about 16px a cell whatever the CSS says. Pinch-zoom
-  and pan is the only real fix and is not built.
+  Two fingers zoom and pan the board (`view.rs`): a CSS transform inside a
+  clipping viewport, clamped so the board always fills it, with one finger
+  left alone to stay a click. That is the answer to Expert's 16px cells on a
+  phone. When the flag toggle scrolls out of sight, a floating stand-in
+  appears in the corner — the one control a game in progress needs.
 
   *Presence.* **Done.** `Event::player` finally does something: flags are drawn
   in the colour of whoever planted them, the other player's last move is ringed

@@ -24,7 +24,19 @@
        vh term keeps a tall board inside the window; the vw term is the phone.
        --cols/--rows are set from Rust whenever the board changes shape. */
     :root { --cols: 9; --rows: 9; --board: min(96vw, calc(var(--cols) * 34px), calc(70vh * var(--cols) / var(--rows))); }
-    #board { width: var(--board); height: auto; }
+    /* The viewport clips the board when it is pinch-zoomed; the transform on
+       the canvas is set from Rust (view.rs) and does not affect layout, so
+       the page never jumps while zooming. */
+    #viewport { width: var(--board); overflow: hidden; touch-action: none; }
+    #board { width: var(--board); height: auto; display: block; transform-origin: 0 0; }
+    /* A stand-in for the flag toggle, shown only while the real one is
+       scrolled out of view — flagging is the one control needed mid-game. */
+    #flagfloat {
+      display: none; position: fixed; right: .75rem; bottom: .75rem; z-index: 10;
+      width: 3rem; height: 3rem; border-radius: 50%; font-size: 1.3rem;
+      color: #dfe2e7; background: #2b3038; border: 1px solid #3a424e;
+      box-shadow: 0 2px 8px rgba(0,0,0,.5); cursor: pointer;
+    }
     /* The controls track the board so the two line up at any size. */
     #controls { display: flex; flex-wrap: wrap; gap: .5rem; width: var(--board); }
     #hud { font: 15px ui-monospace, monospace; color: #dfe2e7; letter-spacing: .05em; }
@@ -73,7 +85,8 @@
   <div id="hud">10 flags left &middot; 0s</div>
   <!-- Empty while the game is on; CSS hides it, so the board never moves. -->
   <div id="banner"></div>
-  <canvas id="board" width="576" height="576"></canvas>
+  <div id="viewport"><canvas id="board" width="576" height="576"></canvas></div>
+  <button id="flagfloat" type="button" title="Flag mode">🚩</button>
   <div id="controls">
     <button id="flag" type="button">Flag mode: off</button>
     <!-- Filled from app::LEVELS at startup, so the labels and the numbers

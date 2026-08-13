@@ -25,6 +25,11 @@ features = [
   "MouseEvent",
   "DomRect", # get_bounding_client_rect's return type needs its own feature
 
+  # Pinch-zoom and pan on the board
+  "Touch",
+  "TouchEvent",
+  "TouchList",
+
   # WebRTC
   "RtcPeerConnection",
   "RtcConfiguration",

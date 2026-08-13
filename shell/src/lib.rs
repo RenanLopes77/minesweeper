@@ -4,6 +4,7 @@ mod net;
 mod qr;
 mod sdp;
 mod sig;
+mod view;
 mod zip;
 
 use std::cell::RefCell;
@@ -116,7 +117,13 @@ pub fn main() -> Result<(), JsValue> {
             .get_element_by_id("flag")
             .ok_or("no #flag button")?
             .dyn_into()?;
-        let (shared, b) = (shared.clone(), btn.clone());
+        let float: web_sys::HtmlElement = doc
+            .get_element_by_id("flagfloat")
+            .ok_or("no #flagfloat")?
+            .dyn_into()?;
+        // One closure, two buttons: the floating stand-in toggles the same
+        // mode, and both show its state so neither can lie about it.
+        let (shared, b, f) = (shared.clone(), btn.clone(), float.clone());
         let on_flag = Closure::<dyn FnMut()>::new(move || {
             let on = {
                 let mut a = shared.borrow_mut();
@@ -128,12 +135,35 @@ pub fn main() -> Result<(), JsValue> {
             } else {
                 "Flag mode: off"
             }));
-            b.style()
-                .set_property("background", if on { "#c0392b" } else { "#2b3038" })
-                .ok();
+            let paint = if on { "#c0392b" } else { "#2b3038" };
+            b.style().set_property("background", paint).ok();
+            f.style().set_property("background", paint).ok();
         });
         btn.add_event_listener_with_callback("click", on_flag.as_ref().unchecked_ref())?;
+        float.add_event_listener_with_callback("click", on_flag.as_ref().unchecked_ref())?;
         on_flag.forget();
+
+        // The stand-in exists only while the real button is scrolled out of
+        // sight — a tall board on a phone puts the controls a screen away
+        // from the cells being flagged.
+        let sync = move || {
+            let r = btn.get_bounding_client_rect();
+            let vh = web_sys::window()
+                .and_then(|w| w.inner_height().ok())
+                .and_then(|h| h.as_f64())
+                .unwrap_or(0.0);
+            let out = r.bottom() < 0.0 || r.top() > vh;
+            float
+                .style()
+                .set_property("display", if out { "block" } else { "none" })
+                .ok();
+        };
+        sync();
+        let watch = Closure::<dyn FnMut()>::new(sync);
+        for ev in ["scroll", "resize"] {
+            win.add_event_listener_with_callback(ev, watch.as_ref().unchecked_ref())?;
+        }
+        watch.forget();
     }
 
     // New game, at whatever the picker says. The Start travels, so the peer
@@ -202,6 +232,7 @@ pub fn main() -> Result<(), JsValue> {
     canvas.add_event_listener_with_callback("contextmenu", block.as_ref().unchecked_ref())?;
     block.forget();
 
+    view::wire(&doc)?;
     sig::wire(&doc, shared)?;
 
     Ok(())
