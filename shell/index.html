@@ -24,11 +24,13 @@
        vh term keeps a tall board inside the window; the vw term is the phone.
        --cols/--rows are set from Rust whenever the board changes shape. */
     :root { --cols: 9; --rows: 9; --board: min(96vw, calc(var(--cols) * 34px), calc(70vh * var(--cols) / var(--rows))); }
-    /* The viewport clips the board when it is pinch-zoomed; the transform on
-       the canvas is set from Rust (view.rs) and does not affect layout, so
-       the page never jumps while zooming. */
-    #viewport { width: var(--board); overflow: hidden; touch-action: none; }
-    #board { width: var(--board); height: auto; display: block; transform-origin: 0 0; }
+    /* The board's scroll frame. Zooming (view.rs) grows the canvas's layout
+       width, so the page really gets taller and this frame scrolls sideways —
+       the whole page view moves, nothing is cropped away. `safe center` keeps
+       a small board centred without making a zoomed one's left edge
+       unreachable. */
+    #viewport { width: 96vw; display: grid; justify-items: safe center; overflow-x: auto; touch-action: none; }
+    #board { width: var(--board); height: auto; display: block; }
     /* A stand-in for the flag toggle, shown only while the real one is
        scrolled out of view — flagging is the one control needed mid-game. */
     #flagfloat {

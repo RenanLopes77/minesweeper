@@ -161,11 +161,14 @@ number.
   it and Beginner does not stretch to match. Long-press flagging is still
   unbuilt; the toggle covers it without a timer.
 
-  Two fingers zoom and pan the board (`view.rs`): a CSS transform inside a
-  clipping viewport, clamped so the board always fills it, with one finger
-  left alone to stay a click. That is the answer to Expert's 16px cells on a
-  phone. When the flag toggle scrolls out of sight, a floating stand-in
-  appears in the corner — the one control a game in progress needs.
+  Two fingers zoom and pan the board (`view.rs`), and the zoom is layout,
+  not a transform: the canvas's CSS width is multiplied, the page grows with
+  it, and panning is ordinary scrolling — the page vertically, a frame
+  around the canvas horizontally. Nothing is cropped behind a clipped box,
+  and one finger is left alone to stay a click. That is the answer to
+  Expert's 16px cells on a phone. When the flag toggle scrolls out of sight,
+  a floating stand-in appears in the corner — the one control a game in
+  progress needs.
 
   *Presence.* **Done.** `Event::player` finally does something: flags are drawn
   in the colour of whoever planted them, the other player's last move is ringed
