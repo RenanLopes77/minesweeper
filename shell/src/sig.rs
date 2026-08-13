@@ -250,7 +250,19 @@ fn reset_handshake(pc: &Pc, role: &Rc<Cell<Role>>, era: &Era) {
 fn dropped(app: &app::Shared, pc: &Pc, role: &Rc<Cell<Role>>, era: &Era, mine: u32) {
     // A report from a handshake we have already left says nothing about the
     // one we are in now.
-    if era.get() != mine || app.borrow().chan.is_none() {
+    if era.get() != mine {
+        return;
+    }
+    // No channel has ever opened: ICE ran out of patience while a human was
+    // still carrying the reply, and Chrome calls that Failed. It revives by
+    // itself when the answer lands and real checks begin — watched happen
+    // over 5G — so say what the wait actually is instead of tearing the
+    // handshake down. On a network that truly cannot connect this reads
+    // hopeful for a while, but the old silence read broken immediately.
+    if app.borrow().chan.is_none() {
+        net::note(
+            "not connected yet — send the reply if you have not; it connects by itself once the host pastes it",
+        );
         return;
     }
     app.borrow_mut().chan = None;

@@ -38,9 +38,18 @@ pub fn new_connection() -> Result<RtcPeerConnection, JsValue> {
     RtcPeerConnection::new_with_configuration(&cfg)
 }
 
-/// Resolves once ICE gathering is complete, so `local_description()` contains
-/// every candidate we will ever have. Without this the SDP you copy out is
-/// missing its candidates and the peer can never reach you.
+/// How long ICE gathering may hold up the link. Chrome does not report
+/// Complete until every interface's STUN query answers or dies of its own
+/// timeout, and mobile carriers routinely leave one address family to die —
+/// seen on 5G, where a joiner sat on "gathering" past the point of ICE
+/// giving up. The candidates found by now are the ones a peer could reach
+/// anyway; a link that exists beats a complete one that never arrives.
+const GATHER_CAP_MS: i32 = 8_000;
+
+/// Resolves once ICE gathering is complete — or once the cap says complete
+/// enough — so `local_description()` carries the candidates the peer needs.
+/// Without any wait the SDP you copy out has no candidates at all and the
+/// peer can never reach you.
 async fn wait_for_ice(pc: &RtcPeerConnection) -> Result<(), JsValue> {
     if pc.ice_gathering_state() == RtcIceGatheringState::Complete {
         return Ok(());
@@ -56,6 +65,19 @@ async fn wait_for_ice(pc: &RtcPeerConnection) -> Result<(), JsValue> {
         });
         pc2.set_onicegatheringstatechange(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+        // The cap. Settling a promise twice is a no-op, so racing the state
+        // change is safe.
+        let r = resolve.clone();
+        let late = Closure::<dyn FnMut()>::new(move || {
+            let _ = r.call0(&JsValue::NULL);
+        });
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                late.as_ref().unchecked_ref(),
+                GATHER_CAP_MS,
+            );
+        }
+        late.forget();
         // Re-check *after* installing the handler. Gathering can finish in the
         // window between the early return above and this line, and that event
         // is gone for good — the await would never resolve.
@@ -64,6 +86,9 @@ async fn wait_for_ice(pc: &RtcPeerConnection) -> Result<(), JsValue> {
         }
     });
     JsFuture::from(promise).await?;
+    if pc.ice_gathering_state() != RtcIceGatheringState::Complete {
+        log("gathering capped — sending the candidates found so far");
+    }
     Ok(())
 }
 
