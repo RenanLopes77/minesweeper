@@ -2,6 +2,7 @@ mod app;
 mod b64;
 mod net;
 mod qr;
+mod sdp;
 mod sig;
 mod zip;
 

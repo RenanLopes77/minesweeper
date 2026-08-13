@@ -90,12 +90,19 @@ and then base64url encoded. Fragments are never sent to the server, so the
 handshake stays between the two peers even though the page is hosted on GitHub
 Pages.
 
-Deflate is worth it because the link is carried by a human: an SDP is
-repetitive ASCII, so `CompressionStream('deflate-raw')` — a browser feature,
-not a dependency — takes an offer from 994 bytes to 568, the link from 1372
-characters to 783, and the QR code from 141 modules square to 109. Anything
-that cannot be compressed is sent plain, and a link from an older peer that
-was never compressed still decodes.
+Shrinking the payload is worth real effort because the link is carried by a
+human, usually as a QR code. An SDP is a page of boilerplate wrapped around
+five facts the peer cannot guess — the ICE username and password, the DTLS
+fingerprint, the DTLS role, and the candidate addresses — so `sdp.rs` sends
+just the facts in a small binary form and rebuilds the rest from a template
+on arrival: a 994-byte offer becomes 129 bytes on the wire, the link about
+200 characters, and the QR code 57 modules square (deflating the whole text,
+the previous scheme, managed 568 bytes and 109 modules).
+
+The fallbacks stay honest: an SDP the compact form does not fully recognise
+is deflated whole with `CompressionStream('deflate-raw')` — a browser
+feature, not a dependency — and sent that way; decoding tries compact, then
+inflate, then plain text, so a link from an older peer still connects.
 
 **Two links is not a choice.** The peer answering has to send back its DTLS
 fingerprint, its ICE credentials and at least one candidate; none of the three
@@ -122,9 +129,15 @@ number.
 - **Phase 1** — deterministic engine, canvas renderer, mouse input. *Done.*
 - **Phase 2** — WebRTC co-op. *Done.* Wire format, handshake, link + QR
   signalling, event-log sync, and desync detection via `Game::hash()`.
-- **Phase 3** — make it pleasant. **Next.** Everything so far has been aimed
-  at "does it work at all"; this is the pass that makes it a game someone
-  would choose to play.
+- **Phase 3** — make it pleasant. *Done.* Everything before it was aimed at
+  "does it work at all"; this was the pass that made it a game someone would
+  choose to play.
+
+  *Modes.* **Done.** Three, picked from the page: co-op (one board, shared
+  fate), flag race (mines are prizes — uncovering or flagging one claims it,
+  most claims wins), and race (same deal, a board each, first one home wins
+  and a mine hands the race to the other player). The mode travels in
+  `Start`, so both peers always play the same rules.
 
   *Connecting.* **Done.** Host and Join side by side — Join reads the link
   straight off the clipboard, so a phone never needs long-press-paste; links are
@@ -174,24 +187,6 @@ number.
     hand over their whole log: merging two logs of the same game *is* shipping
     the missing tail, in both directions, without either side working out what
     the other lacks.
-
-- **Phase 5** — a wgpu renderer, *if it ever earns its place.* Parked, and
-  possibly permanently.
-
-  Minesweeper is a static grid that changes only on click. Canvas2D draws a
-  few thousand cells in well under a millisecond, and there is no frame loop
-  because there is nothing to animate. wgpu would mean several hundred lines
-  of adapter/device/surface/pipeline setup plus a texture atlas to replace
-  `fill_text` — to produce the same picture, with more to break on a phone.
-
-  Reasons that would change the answer: boards large enough that per-cell
-  CPU work matters, smooth zoom and pan over them, or effects (explosions,
-  shader transitions) that canvas cannot do well. Wanting to learn wgpu also
-  counts — but as a learning project, not as something this game needs.
-
-  The engine/shell split means this stays cheap to reconsider: the renderer
-  is the only thing that would change, and every engine test would still
-  pass. That was worth designing for even if it is never used.
 
 ## Known gaps
 

@@ -40,18 +40,22 @@ type Pc = Rc<RefCell<Option<RtcPeerConnection>>>;
 /// remembers the generation it belongs to and stays quiet once it is stale.
 type Era = Rc<Cell<u32>>;
 
-/// `#o=` for an offer, `#a=` for an answer. The SDP is deflated first — it is
-/// repetitive ASCII, so this is most of the difference between a QR code that
+/// `#o=` for an offer, `#a=` for an answer. Compacted to its bare facts when
+/// the SDP is one we fully understand (see `sdp.rs`), deflated whole when it
+/// is not — either way this is most of the difference between a QR code that
 /// scans and one that does not.
 async fn make_link(kind: char, sdp: &str) -> String {
-    let packed = match zip::deflate(sdp.as_bytes()).await {
-        Ok(bytes) => bytes,
-        // Compression is an optimisation, never a requirement: a peer that
-        // cannot deflate still gets a working, longer link.
-        Err(e) => {
-            net::log(&format!("deflate unavailable, sending plain: {e:?}"));
-            sdp.as_bytes().to_vec()
-        }
+    let packed = match crate::sdp::compact(sdp) {
+        Some(bytes) => bytes,
+        None => match zip::deflate(sdp.as_bytes()).await {
+            Ok(bytes) => bytes,
+            // Compression is an optimisation, never a requirement: a peer
+            // that cannot deflate still gets a working, longer link.
+            Err(e) => {
+                net::log(&format!("deflate unavailable, sending plain: {e:?}"));
+                sdp.as_bytes().to_vec()
+            }
+        },
     };
     net::log(&format!(
         "sdp {} bytes -> {} on the wire",
@@ -120,21 +124,32 @@ fn shape_of(s: &str) -> Option<Pasted> {
     Some(Pasted::Packed(b64::decode(payload)?))
 }
 
-/// The SDP a paste carries, inflating it if it is compressed.
+/// The SDP a paste carries: expanded from the compact form, or inflated if
+/// it is a deflated one from an older peer.
 async fn sdp_from_input(s: &str) -> Option<String> {
     match shape_of(s)? {
         Pasted::Sdp(sdp) => Some(sdp),
-        Pasted::Packed(bytes) => match zip::inflate(&bytes).await {
-            // The output cap: input small enough to pass `shape_of` can
-            // still inflate to far more than any SDP has business being.
-            Ok(plain) if plain.len() <= MAX_SDP => String::from_utf8(plain).ok(),
-            Ok(_) => None,
-            // Links made before the format was compressed are plain base64,
-            // and a stray paste can be anything at all. Both land here.
-            Err(_) => String::from_utf8(bytes)
-                .ok()
-                .filter(|s| s.starts_with("v=")),
-        },
+        Pasted::Packed(bytes) => {
+            if let Some(sdp) = crate::sdp::expand(&bytes) {
+                return Some(sdp);
+            }
+            unpack_deflated(bytes).await
+        }
+    }
+}
+
+/// The pre-compact formats: deflated SDP, or — older still — plain base64.
+async fn unpack_deflated(bytes: Vec<u8>) -> Option<String> {
+    match zip::inflate(&bytes).await {
+        // The output cap: input small enough to pass `shape_of` can
+        // still inflate to far more than any SDP has business being.
+        Ok(plain) if plain.len() <= MAX_SDP => String::from_utf8(plain).ok(),
+        Ok(_) => None,
+        // Links made before the format was compressed are plain base64,
+        // and a stray paste can be anything at all. Both land here.
+        Err(_) => String::from_utf8(bytes)
+            .ok()
+            .filter(|s| s.starts_with("v=")),
     }
 }
 
