@@ -111,6 +111,12 @@ peers behind NAT need it to learn their own public address. It sees an IP and
 nothing else. Networks requiring a TURN relay are not supported — roughly the
 symmetric-NAT cases — and will simply fail to connect.
 
+The invite link contains your public IP, as any direct peer-to-peer
+connection must — the peer's browser cannot send you packets without knowing
+where to send them, and removing the address from the link would not hide it
+from the connection itself. Share the link like you'd share your phone
+number.
+
 ## Roadmap
 
 - **Phase 1** — deterministic engine, canvas renderer, mouse input. *Done.*

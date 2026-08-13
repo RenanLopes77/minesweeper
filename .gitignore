@@ -1,3 +1,4 @@
 /target
 /dist
 shell/dist
+.claude/
