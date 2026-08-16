@@ -16,7 +16,7 @@ use engine::{
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d as Ctx, RtcDataChannel};
 
-use crate::net;
+use p2p_link::net;
 
 pub const CELL: f64 = 32.0;
 /// Canvas bitmap pixels per logical pixel. The canvas element is 2x the board

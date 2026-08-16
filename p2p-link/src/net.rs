@@ -8,6 +8,7 @@
 //!
 //! Cost: the handshake takes a second or two longer. Benefit: no server.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use js_sys::{Promise, Reflect};
@@ -224,17 +225,37 @@ fn on_message(ch: &RtcDataChannel) -> JsFuture {
     }))
 }
 
-/// Appends a line to #log and the browser console. WebRTC failures are silent
-/// and asynchronous — without a running transcript there is nothing to read.
+/// A place lines go. Boxed rather than generic: sinks are installed once at
+/// startup and called on the error path, where dynamic dispatch costs nothing.
+type Sink = RefCell<Option<Box<dyn Fn(&str)>>>;
+
+thread_local! {
+    // wasm is single-threaded, so a thread_local is just a module global.
+    static LOG_SINK: Sink = const { RefCell::new(None) };
+    static NOTE_SINK: Sink = const { RefCell::new(None) };
+}
+
+/// Installs the transcript sink — every `log` line lands here as well as in
+/// the console. The application decides what a transcript looks like.
+pub fn on_log(f: impl Fn(&str) + 'static) {
+    LOG_SINK.with(|s| *s.borrow_mut() = Some(Box::new(f)));
+}
+
+/// Installs the status sink — the single current line `note` maintains.
+pub fn on_note(f: impl Fn(&str) + 'static) {
+    NOTE_SINK.with(|s| *s.borrow_mut() = Some(Box::new(f)));
+}
+
+/// Appends a line to the transcript sink and the browser console. WebRTC
+/// failures are silent and asynchronous — without a running transcript there
+/// is nothing to read.
 pub fn log(msg: &str) {
     web_sys::console::log_1(&JsValue::from_str(msg));
-    if let Some(el) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("log"))
-    {
-        let prev = el.text_content().unwrap_or_default();
-        el.set_text_content(Some(&format!("{prev}{msg}\n")));
-    }
+    LOG_SINK.with(|s| {
+        if let Some(f) = s.borrow().as_ref() {
+            f(msg);
+        }
+    });
 }
 
 /// How many candidates of each kind an SDP carries.
@@ -306,16 +327,16 @@ pub fn trace_states(pc: &RtcPeerConnection, tag: &'static str, on_drop: Rc<dyn F
     cb.forget();
 }
 
-/// Writes progress into #status. When a WebRTC handshake stalls it stalls
-/// silently, so knowing which await never returned is most of the diagnosis.
+/// Reports progress to the status sink. When a WebRTC handshake stalls it
+/// stalls silently, so knowing which await never returned is most of the
+/// diagnosis.
 pub fn note(stage: &str) {
     log(stage);
-    if let Some(el) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("status"))
-    {
-        el.set_text_content(Some(stage));
-    }
+    NOTE_SINK.with(|s| {
+        if let Some(f) = s.borrow().as_ref() {
+            f(stage);
+        }
+    });
 }
 
 /// Runs the whole handshake between two connections in this one tab and

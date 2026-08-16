@@ -1,11 +1,9 @@
 mod app;
-mod b64;
-mod net;
 mod qr;
-mod sdp;
 mod sig;
 mod view;
-mod zip;
+
+use p2p_link::net;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -42,6 +40,26 @@ pub fn debug_log_len() -> usize {
 pub fn main() -> Result<(), JsValue> {
     let win = web_sys::window().ok_or("no window")?;
     let doc = win.document().ok_or("no document")?;
+
+    // Where p2p-link's transcript and status lines land on this page. The
+    // crate itself is headless; these two closures are the whole binding.
+    net::on_log(|msg| {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("log"))
+        {
+            let prev = el.text_content().unwrap_or_default();
+            el.set_text_content(Some(&format!("{prev}{msg}\n")));
+        }
+    });
+    net::on_note(|stage| {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("status"))
+        {
+            el.set_text_content(Some(stage));
+        }
+    });
 
     // ?selftest runs the WebRTC loopback instead of the game. Not a unit test
     // — running it needs a real browser, and a real browser is the thing under

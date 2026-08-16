@@ -19,7 +19,8 @@ use web_sys::{
     Document, HtmlTextAreaElement, RtcDataChannel, RtcDataChannelType, RtcPeerConnection,
 };
 
-use crate::{app, b64, net, zip};
+use crate::app;
+use p2p_link::{b64, net, zip};
 
 /// Who we are in the handshake. Decides what a pasted link means.
 #[derive(Clone, Copy, PartialEq)]
@@ -45,7 +46,7 @@ type Era = Rc<Cell<u32>>;
 /// is not — either way this is most of the difference between a QR code that
 /// scans and one that does not.
 async fn make_link(kind: char, sdp: &str) -> String {
-    let packed = match crate::sdp::compact(sdp) {
+    let packed = match p2p_link::sdp::compact(sdp) {
         Some(bytes) => bytes,
         None => match zip::deflate(sdp.as_bytes()).await {
             Ok(bytes) => bytes,
@@ -130,7 +131,7 @@ async fn sdp_from_input(s: &str) -> Option<String> {
     match shape_of(s)? {
         Pasted::Sdp(sdp) => Some(sdp),
         Pasted::Packed(bytes) => {
-            if let Some(sdp) = crate::sdp::expand(&bytes) {
+            if let Some(sdp) = p2p_link::sdp::expand(&bytes) {
                 return Some(sdp);
             }
             unpack_deflated(bytes).await

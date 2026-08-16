@@ -163,6 +163,12 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "p2p-link"
 version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -322,6 +328,7 @@ dependencies = [
  "engine",
  "eventlog",
  "js-sys",
+ "p2p-link",
  "qrcode",
  "wasm-bindgen",
  "wasm-bindgen-futures",
