@@ -76,11 +76,10 @@ pub fn log_hash(log: &[Stamped]) -> u64 {
 pub struct Game {
     pub board: Board,
     pub mode: Mode,
-    /// Mines claimed per player in a flag race. Counted here, as the claim
-    /// lands, because the board deliberately refuses a second claim on the
-    /// same mine — anything that recounts afterwards from the log cannot tell
-    /// the winner from the latecomer.
-    claims: [u32; 2],
+    /// Who owns each standing flag: the last player to plant it, `None` once
+    /// it is lifted. This is what a flag duel scores from — and it is state
+    /// no cell records, so it rides in the game and in `hash`.
+    flag_owner: Vec<Option<u8>>,
     seed: u64,
     placed: bool,
 }
@@ -90,7 +89,7 @@ impl Game {
         Game {
             board: Board::new(w, h, mines),
             mode,
-            claims: [0; 2],
+            flag_owner: vec![None; w as usize * h as usize],
             seed,
             placed: false,
         }
@@ -121,7 +120,7 @@ impl Game {
         }
         match *ev {
             Event::Start { .. } => unreachable!("handled above"),
-            Event::Reveal { player, x, y } => {
+            Event::Reveal { x, y, .. } => {
                 if !self.board.in_bounds(x as i32, y as i32) {
                     return; // a peer sent nonsense; drop it, don't panic
                 }
@@ -141,72 +140,72 @@ impl Game {
                     self.board.place_mines(self.seed, opening);
                     self.placed = true;
                 }
-                // In a flag race the mines are the prize, not the punishment:
-                // uncovering one claims it. `player` is not stored — the flag
-                // is on the board and the log says who put it there.
-                if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
-                    self.claim_for(player, x, y);
-                    return;
-                }
+                // Every mode pays the same price for opening a mine. The
+                // flag duel used to claim it instead, which left no way to
+                // lose — and a game nobody can lose is won by whoever clicks
+                // fastest, not by whoever plays better.
                 self.board.reveal(x, y);
             }
             Event::Flag { player, x, y } => {
                 if !self.board.in_bounds(x as i32, y as i32) {
                     return;
                 }
-                // In a flag race a flag on a mine *is* a claim — the same move
-                // by another name. Letting it flag without crediting anyone
-                // ends the race with a mine nobody owns and a scoreboard that
-                // does not add up to the mines on the table.
-                if self.mode == Mode::FlagRace && self.board.get(x, y).mine {
-                    self.claim_for(player, x, y);
-                    return;
-                }
                 self.board.toggle_flag(x, y);
+                // Ownership follows the flag: the last player to plant it
+                // holds it, and lifting it releases the cell. Taking an
+                // opponent's flag therefore costs two moves in plain sight —
+                // an unflag they can watch, and a reflag they can contest.
+                let i = self.board.idx(x, y);
+                self.flag_owner[i] = match self.board.get(x, y).state {
+                    Reveal::Flagged => Some(player),
+                    _ => None,
+                };
             }
         }
     }
 
-    /// Takes a mine for a player, if it is still there to take. A mine that
-    /// has already been claimed stays with whoever got there first.
-    fn claim_for(&mut self, player: u8, x: u8, y: u8) {
-        if self.board.claim(x, y) {
-            if let Some(slot) = self.claims.get_mut(player as usize) {
-                *slot += 1;
-            }
-        }
-    }
-
-    /// A flag race ends when the last mine is claimed — nobody can lose it,
-    /// so the board's own "did anyone step on a mine" rule never fires and
-    /// its "is everything safe uncovered" rule would drag the game past the
-    /// point where the result is settled.
+    /// Every mode now ends the way the board says: a shown mine loses it, a
+    /// cleared board wins it. The flag duel deliberately ends on *clearing*,
+    /// not on flagging — flags are the score, reveals are the work, and
+    /// someone has to do the dangerous part for the game to finish.
     pub fn status(&self) -> Status {
-        if self.mode == Mode::FlagRace {
-            // Before the first click there are no mines, so "every mine is
-            // claimed" is vacuously true — and would end the game at deal.
-            if !self.placed {
-                return Status::Playing;
-            }
-            let claimed = self
-                .board
-                .cells()
-                .iter()
-                .filter(|c| c.mine && c.state == Reveal::Flagged)
-                .count();
-            return if claimed as u16 == self.board.mines {
-                Status::Won
-            } else {
-                Status::Playing
-            };
-        }
         self.board.status()
     }
 
-    /// Mines claimed by each player in a flag race, in player order. Zero for
-    /// every other mode, where mines are not a prize.
-    pub fn scores(&self) -> [u32; 2] {
-        self.claims
+    /// The duel scoreboard: +1 for a standing flag on a mine, -1 for one on
+    /// a safe cell, per owner. The penalty is what makes spraying flags a
+    /// losing strategy — without it, flagging every hidden cell would be
+    /// optimal and the duel degenerates all over again.
+    ///
+    /// Meaningful at game end; mid-game it is a mine oracle, so the HUD
+    /// shows `flags_placed` instead.
+    pub fn flag_scores(&self) -> [i32; 2] {
+        let mut t = [0i32; 2];
+        for (c, owner) in self.board.cells().iter().zip(&self.flag_owner) {
+            if c.state != Reveal::Flagged {
+                continue;
+            }
+            // An owner two peers would refuse at the wire can still appear
+            // in a local log; skip rather than index out of the scoreboard.
+            if let Some(slot) = owner.and_then(|p| t.get_mut(p as usize)) {
+                *slot += if c.mine { 1 } else { -1 };
+            }
+        }
+        t
+    }
+
+    /// Standing flags per player — what the HUD may show mid-game without
+    /// leaking which flags are right.
+    pub fn flags_placed(&self) -> [u32; 2] {
+        let mut t = [0u32; 2];
+        for (c, owner) in self.board.cells().iter().zip(&self.flag_owner) {
+            if c.state == Reveal::Flagged {
+                if let Some(slot) = owner.and_then(|p| t.get_mut(p as usize)) {
+                    *slot += 1;
+                }
+            }
+        }
+        t
     }
 
     /// Replays, and says which event ended the game.
@@ -264,14 +263,16 @@ impl Game {
     /// detect divergence in 8 bytes instead of shipping the whole board.
     ///
     /// It covers the *deal* as well as the cells — the shape of the board, the
-    /// mine count, the mode and the scoreboard. Hashing cells alone let two
-    /// peers agree while playing different games: a blank 9x9/10 co-op board
-    /// and a blank 9x9/40 race board are identical cell for cell, and a flag
-    /// race's claims are state that no cell records.
+    /// mine count, the mode and who holds each flag. Hashing cells alone let
+    /// two peers agree while playing different games: a blank 9x9/10 co-op
+    /// board and a blank 9x9/40 race board are identical cell for cell, and
+    /// flag ownership — the duel's whole scoreboard — is state no cell
+    /// records.
     ///
-    /// Bit budget per cell: mine 1, adj 4 (0..=8), state 2 (0..=2) = 7.
+    /// Bit budget per cell: mine 1, adj 4 (0..=8), state 2 (0..=2) = 7, and
+    /// the owner (none/0/1) rides in a byte of its own.
     pub fn hash(&self) -> u64 {
-        let mut bytes: Vec<u8> = Vec::with_capacity(self.board.cells().len() + 16);
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.board.cells().len() * 2 + 16);
         let mut mix = |byte: u8| bytes.push(byte);
 
         mix(self.board.w);
@@ -280,13 +281,9 @@ impl Game {
             mix(byte);
         }
         mix(self.mode as u8);
-        for score in self.claims {
-            for byte in score.to_le_bytes() {
-                mix(byte);
-            }
-        }
-        for c in self.board.cells() {
+        for (c, owner) in self.board.cells().iter().zip(&self.flag_owner) {
             mix((c.mine as u8) | (c.adj << 1) | ((c.state as u8) << 5));
+            mix(owner.map_or(0, |p| p.wrapping_add(1)));
         }
         fnv1a(bytes)
     }
@@ -647,9 +644,11 @@ mod mode_tests {
             .collect()
     }
 
-    /// The whole point of a flag race: a mine is a prize, not an ending.
+    /// The rule the duel now stands on: a mine kills here exactly as it does
+    /// in co-op. The old claim-on-reveal rule left no way to lose, and a
+    /// game nobody can lose is won by whoever clicks fastest.
     #[test]
-    fn a_mine_claims_instead_of_killing() {
+    fn a_mine_kills_in_a_flag_duel_too() {
         let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
         g.apply(&Event::Reveal {
             player: 0,
@@ -663,65 +662,37 @@ mod mode_tests {
             x: mine.0,
             y: mine.1,
         });
-        assert_eq!(g.board.get(mine.0, mine.1).state, Reveal::Flagged);
-        assert_eq!(g.status(), Status::Playing, "a claim must not end the game");
-
-        // The same click in co-op is death, which is the difference.
-        let mut c = Game::new(7, 9, 9, 10, Mode::Coop);
-        c.apply(&Event::Reveal {
-            player: 0,
-            x: 4,
-            y: 4,
-        });
-        c.apply(&Event::Reveal {
-            player: 1,
-            x: mine.0,
-            y: mine.1,
-        });
-        assert_eq!(c.status(), Status::Lost);
+        assert_eq!(g.status(), Status::Lost, "a duel mine must still kill");
     }
 
+    /// Flags are the score, reveals are the work: flagging every mine settles
+    /// nothing until someone has actually cleared the safe cells.
     #[test]
-    fn a_claimed_mine_cannot_be_handed_back() {
+    fn the_duel_ends_by_clearing_not_by_flagging() {
         let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
         g.apply(&Event::Reveal {
             player: 0,
             x: 4,
             y: 4,
         });
-        let mine = mines_of(&g)[0];
-        g.apply(&Event::Reveal {
-            player: 0,
-            x: mine.0,
-            y: mine.1,
-        });
-        // Claiming again is a no-op rather than a toggle back to hidden.
-        g.apply(&Event::Reveal {
-            player: 1,
-            x: mine.0,
-            y: mine.1,
-        });
-        assert_eq!(g.board.get(mine.0, mine.1).state, Reveal::Flagged);
-    }
-
-    #[test]
-    fn the_race_ends_when_the_last_mine_is_claimed() {
-        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
-        g.apply(&Event::Reveal {
-            player: 0,
-            x: 4,
-            y: 4,
-        });
-        let mines = mines_of(&g);
-        for (i, &(x, y)) in mines.iter().enumerate() {
-            assert_eq!(g.status(), Status::Playing, "ended early at mine {i}");
-            g.apply(&Event::Reveal {
-                player: (i % 2) as u8,
-                x,
-                y,
-            });
+        for &(x, y) in &mines_of(&g) {
+            g.apply(&Event::Flag { player: 0, x, y });
         }
-        assert_eq!(g.status(), Status::Won, "claiming every mine must end it");
+        assert_eq!(
+            g.status(),
+            Status::Playing,
+            "flagging every mine must not end the duel"
+        );
+
+        let cells: Vec<(u8, u8)> = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .filter(|&(x, y)| !g.board.get(x, y).mine)
+            .collect();
+        for (x, y) in cells {
+            g.apply(&Event::Reveal { player: 1, x, y });
+        }
+        assert_eq!(g.status(), Status::Won, "a cleared board ends the duel");
+        assert_eq!(g.flag_scores(), [10, 0], "every flag was on a mine");
     }
 
     /// Race is co-op's rules on a board each; the engine treats it the same
@@ -785,54 +756,7 @@ mod race_layout_tests {
 }
 
 #[cfg(test)]
-mod flag_race_endgame {
-    use super::*;
-
-    /// Clearing every safe cell is "won" to a plain board, but a flag race is
-    /// not over until the mines are claimed — the guard on incoming moves has
-    /// to agree, or the last mine can never be taken.
-    #[test]
-    fn the_last_mine_is_still_claimable_once_the_board_is_clear() {
-        let mut g = Game::new(11, 9, 9, 10, Mode::FlagRace);
-        g.apply(&Event::Reveal {
-            player: 0,
-            x: 4,
-            y: 4,
-        });
-
-        let cells: Vec<(u8, u8)> = (0..9u8)
-            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
-            .collect();
-        // Deciding which cells to click has to finish before clicking starts:
-        // the filter borrows the board that `apply` wants to mutate.
-        type Coords = Vec<(u8, u8)>;
-        let (mines, safe): (Coords, Coords) =
-            cells.iter().partition(|&&(x, y)| g.board.get(x, y).mine);
-        // Every safe cell first: this is what makes the board call itself won.
-        for (x, y) in safe {
-            g.apply(&Event::Reveal { player: 0, x, y });
-        }
-        for (i, &(x, y)) in mines.iter().enumerate() {
-            g.apply(&Event::Reveal {
-                player: (i % 2) as u8,
-                x,
-                y,
-            });
-        }
-
-        let claimed = g
-            .board
-            .cells()
-            .iter()
-            .filter(|c| c.mine && c.state == Reveal::Flagged)
-            .count();
-        assert_eq!(claimed, 10, "a mine was left unclaimable");
-        assert_eq!(g.status(), Status::Won);
-    }
-}
-
-#[cfg(test)]
-mod claim_ownership {
+mod flag_ownership {
     use super::*;
 
     fn opened(seed: u64) -> (Game, Vec<(u8, u8)>) {
@@ -849,45 +773,77 @@ mod claim_ownership {
         (g, mines)
     }
 
-    /// The board refuses a second claim on the same mine. The score has to
-    /// refuse it too, or clicking a mine your opponent already took quietly
-    /// moves the point across the table.
     #[test]
-    fn a_re_click_does_not_steal_a_claim() {
-        let (mut g, mines) = opened(7);
-        let (x, y) = mines[0];
-
-        g.apply(&Event::Reveal { player: 0, x, y });
-        assert_eq!(g.scores(), [1, 0]);
-
-        g.apply(&Event::Reveal { player: 1, x, y });
-        assert_eq!(g.scores(), [1, 0], "the second click took the point");
-        assert_eq!(g.board.get(x, y).state, Reveal::Flagged);
-    }
-
-    #[test]
-    fn each_claim_credits_the_player_who_landed_it() {
+    fn a_flag_scores_for_whoever_planted_it() {
         let (mut g, mines) = opened(7);
         for (i, &(x, y)) in mines.iter().enumerate() {
-            g.apply(&Event::Reveal {
+            g.apply(&Event::Flag {
                 player: (i % 2) as u8,
                 x,
                 y,
             });
         }
-        assert_eq!(g.scores(), [5, 5]);
-        assert_eq!(g.status(), Status::Won);
+        assert_eq!(g.flag_scores(), [5, 5]);
+        assert_eq!(g.flags_placed(), [5, 5]);
+    }
+
+    /// Taking an opponent's flag is two visible moves: the lift releases the
+    /// point, the replant claims it. Nothing moves silently.
+    #[test]
+    fn a_flag_can_be_taken_but_it_costs_two_moves() {
+        let (mut g, mines) = opened(7);
+        let (x, y) = mines[0];
+
+        g.apply(&Event::Flag { player: 0, x, y });
+        assert_eq!(g.flag_scores(), [1, 0]);
+
+        // The opponent's flag click lifts it — nobody holds the point now.
+        g.apply(&Event::Flag { player: 1, x, y });
+        assert_eq!(g.board.get(x, y).state, Reveal::Hidden);
+        assert_eq!(g.flag_scores(), [0, 0], "a lifted flag still scored");
+
+        // ...and their second click plants their own.
+        g.apply(&Event::Flag { player: 1, x, y });
+        assert_eq!(g.flag_scores(), [0, 1]);
+    }
+
+    /// The -1: a standing flag on a safe cell counts against its owner, which
+    /// is the whole defence against spraying flags across the board.
+    #[test]
+    fn flagging_a_safe_cell_costs_a_point() {
+        let (mut g, mines) = opened(7);
+        let safe = (0..9u8)
+            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
+            .find(|c| !mines.contains(c) && g.board.get(c.0, c.1).state == Reveal::Hidden)
+            .unwrap();
+        g.apply(&Event::Flag {
+            player: 0,
+            x: safe.0,
+            y: safe.1,
+        });
+        assert_eq!(g.flag_scores(), [-1, 0]);
+        // The HUD's number is just flags, right or wrong — mid-game the
+        // difference is a mine detector, so it is not on offer.
+        assert_eq!(g.flags_placed(), [1, 0]);
+
+        // Lifting your own mistake takes the point back off the table.
+        g.apply(&Event::Flag {
+            player: 0,
+            x: safe.0,
+            y: safe.1,
+        });
+        assert_eq!(g.flag_scores(), [0, 0]);
     }
 
     #[test]
     fn a_restart_wipes_the_scoreboard() {
         let (mut g, mines) = opened(7);
-        g.apply(&Event::Reveal {
+        g.apply(&Event::Flag {
             player: 0,
             x: mines[0].0,
             y: mines[0].1,
         });
-        assert_eq!(g.scores(), [1, 0]);
+        assert_eq!(g.flag_scores(), [1, 0]);
 
         g.apply(&Event::Start {
             seed: 8,
@@ -896,34 +852,19 @@ mod claim_ownership {
             mines: 10,
             mode: Mode::FlagRace,
         });
-        assert_eq!(g.scores(), [0, 0]);
+        assert_eq!(g.flag_scores(), [0, 0]);
     }
 
     /// A peer can put any byte in `player`. Indexing the scoreboard with it
-    /// must not panic, and the claim still lands on the board.
+    /// must not panic; the flag still lands on the board.
     #[test]
-    fn a_claim_from_an_unknown_player_is_not_fatal() {
+    fn a_flag_from_an_unknown_player_is_not_fatal() {
         let (mut g, mines) = opened(7);
         let (x, y) = mines[0];
-        g.apply(&Event::Reveal { player: 200, x, y });
-        assert_eq!(g.scores(), [0, 0]);
+        g.apply(&Event::Flag { player: 200, x, y });
+        assert_eq!(g.flag_scores(), [0, 0]);
+        assert_eq!(g.flags_placed(), [0, 0]);
         assert_eq!(g.board.get(x, y).state, Reveal::Flagged);
-    }
-
-    /// Only mines are prizes: an ordinary flag on a safe cell scores nothing.
-    #[test]
-    fn flagging_a_safe_cell_scores_nothing() {
-        let (mut g, mines) = opened(7);
-        let safe = (0..9u8)
-            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
-            .find(|c| !mines.contains(c))
-            .unwrap();
-        g.apply(&Event::Flag {
-            player: 0,
-            x: safe.0,
-            y: safe.1,
-        });
-        assert_eq!(g.scores(), [0, 0]);
     }
 }
 
@@ -947,29 +888,6 @@ mod hostile {
         );
     }
 
-    #[test]
-    fn a_claimed_mine_cannot_be_unflagged() {
-        let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
-        g.apply(&Event::Reveal {
-            player: 0,
-            x: 4,
-            y: 4,
-        });
-        let (x, y) = (0..9u8)
-            .flat_map(|y| (0..9u8).map(move |x| (x, y)))
-            .find(|&(x, y)| g.board.get(x, y).mine)
-            .unwrap();
-
-        g.apply(&Event::Reveal { player: 0, x, y });
-        g.apply(&Event::Flag { player: 1, x, y });
-        assert_eq!(
-            g.board.get(x, y).state,
-            Reveal::Flagged,
-            "a flag click gave away someone's claim"
-        );
-        assert_eq!(g.scores(), [1, 0]);
-    }
-
     proptest! {
         /// The trust boundary, end to end: whatever a peer puts in a Start,
         /// folding it must not panic. `place_mines` used to assert when the
@@ -991,7 +909,8 @@ mod hostile {
             g.apply(&Event::Flag { player: 1, x, y });
             let _ = g.status();
             let _ = g.hash();
-            let _ = g.scores();
+            let _ = g.flag_scores();
+            let _ = g.flags_placed();
         }
 
         /// Placement is total: never more mines than there are cells to hold
@@ -1012,38 +931,54 @@ mod flag_race_bookkeeping {
     use super::*;
     use proptest::prelude::*;
 
-    /// The scoreboard has to account for every mine on the table. A flag on a
-    /// mine used to plant a flag without crediting anyone, so the race ended
-    /// with a mine nobody owned and a tally that did not add up.
+    /// The duel's whole arithmetic in one game: right flags count for you,
+    /// wrong flags count against you, and the difference only means anything
+    /// because both are standing when the board is cleared.
     #[test]
-    fn a_right_click_claims_rather_than_just_flagging() {
+    fn the_net_score_rewards_right_flags_and_punishes_wrong_ones() {
         let mut g = Game::new(7, 9, 9, 10, Mode::FlagRace);
         g.apply(&Event::Reveal {
             player: 0,
             x: 4,
             y: 4,
         });
-        let mines: Vec<(u8, u8)> = (0..9u8)
+        let cells: Vec<(u8, u8)> = (0..9u8)
             .flat_map(|y| (0..9u8).map(move |x| (x, y)))
-            .filter(|&(x, y)| g.board.get(x, y).mine)
             .collect();
+        type Coords = Vec<(u8, u8)>;
+        let (mines, safe): (Coords, Coords) =
+            cells.iter().partition(|&&(x, y)| g.board.get(x, y).mine);
 
+        // Player 0: two mines and one blunder. Player 1: one mine.
+        for &(x, y) in &mines[..2] {
+            g.apply(&Event::Flag { player: 0, x, y });
+        }
+        let blunder = safe
+            .iter()
+            .find(|&&(x, y)| g.board.get(x, y).state == Reveal::Hidden)
+            .copied()
+            .unwrap();
+        g.apply(&Event::Flag {
+            player: 0,
+            x: blunder.0,
+            y: blunder.1,
+        });
         g.apply(&Event::Flag {
             player: 1,
-            x: mines[0].0,
-            y: mines[0].1,
+            x: mines[2].0,
+            y: mines[2].1,
         });
-        assert_eq!(g.scores(), [0, 1], "a flagged mine credited nobody");
 
-        for &(x, y) in &mines[1..] {
-            g.apply(&Event::Reveal { player: 0, x, y });
-        }
-        assert_eq!(g.status(), Status::Won);
-        assert_eq!(
-            g.scores().iter().sum::<u32>() as u16,
-            g.board.mines,
-            "the race ended without every mine being owned"
-        );
+        assert_eq!(g.flag_scores(), [1, 1], "2 - 1 against 1");
+        assert_eq!(g.flags_placed(), [3, 1], "the HUD count hides correctness");
+
+        // Owning the mistake takes the -1 back off the table.
+        g.apply(&Event::Flag {
+            player: 0,
+            x: blunder.0,
+            y: blunder.1,
+        });
+        assert_eq!(g.flag_scores(), [2, 1]);
     }
 
     proptest! {
@@ -1100,8 +1035,8 @@ mod hash_covers_the_deal {
         assert_eq!(base.hash(), Game::new(2, 9, 9, 10, Mode::Coop).hash());
     }
 
-    /// A flag race's scoreboard is state no cell records: the same board can
-    /// belong to either player, and only the hash can say so.
+    /// Flag ownership — the duel's scoreboard — is state no cell records: the
+    /// same board can belong to either player, and only the hash can say so.
     #[test]
     fn the_scoreboard_is_part_of_the_state() {
         let deal = |p: u8| {
@@ -1115,7 +1050,7 @@ mod hash_covers_the_deal {
                 .flat_map(|y| (0..9u8).map(move |x| (x, y)))
                 .find(|&(x, y)| g.board.get(x, y).mine)
                 .unwrap();
-            g.apply(&Event::Reveal {
+            g.apply(&Event::Flag {
                 player: p,
                 x: mine.0,
                 y: mine.1,
@@ -1123,8 +1058,8 @@ mod hash_covers_the_deal {
             g
         };
         let (red, blue) = (deal(0), deal(1));
-        assert_eq!(red.scores(), [1, 0]);
-        assert_eq!(blue.scores(), [0, 1]);
+        assert_eq!(red.flag_scores(), [1, 0]);
+        assert_eq!(blue.flag_scores(), [0, 1]);
         assert_ne!(
             red.hash(),
             blue.hash(),

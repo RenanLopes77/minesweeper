@@ -101,10 +101,10 @@ test('the mode picker comes from the engine', async ({ page }) => {
   const options = page.locator('#mode option');
   await expect(options).toHaveCount(3);
   await expect(options.nth(0)).toContainText('Co-op');
-  await expect(options.nth(1)).toContainText('Flag race');
+  await expect(options.nth(1)).toContainText('Flag duel');
   await expect(options.nth(2)).toContainText('Race');
 
-  // And picking the second one really starts a flag race.
+  // And picking the second one really starts a flag duel.
   await page.locator('#mode').selectOption({ index: 1 });
   await page.locator('#restart').click();
   await expect(page.locator('#hud')).toContainText('red 0 – 0 blue');
@@ -252,10 +252,11 @@ test('a reconnect with the roles reversed keeps your seat and your game', async 
   await c.close();
 });
 
-/// Flag race: mines are the prize. Uncovering one claims it for your colour
-/// instead of ending the game, and the mode travels on Start so the joiner
-/// switches with the host.
-test('flag race scores instead of killing', async ({ browser }) => {
+/// Flag duel: survived together, scored by flags. A flag shows up in the
+/// HUD under its owner's colour, a revealed mine still ends the game for
+/// both — the old claim-on-reveal rule let a fast clicker win without risk —
+/// and the banner names whoever set it off.
+test('flag duel counts flags and a mine still kills', async ({ browser }) => {
   const a = await browser.newPage();
   const b = await browser.newPage();
   await connect(a, b);
@@ -265,16 +266,18 @@ test('flag race scores instead of killing', async ({ browser }) => {
   await expect(a.locator('#hud')).toContainText('red 0 – 0 blue');
   await expect(b.locator('#hud')).toContainText('red 0 – 0 blue', { timeout: 15_000 });
 
-  // Uncover the whole board from one side: every mine gets claimed and
-  // nobody dies, which is the entire difference from co-op.
+  // The joiner plants a flag before anything is open, so the cell is
+  // guaranteed hidden. It lands under blue on both screens.
+  await clickCell(b, 0, 0, 'right');
+  await expect(a.locator('#hud')).toContainText('red 0 – 1 blue', { timeout: 15_000 });
+  await expect(b.locator('#hud')).toContainText('9 mines unflagged');
+
+  // The host opens the board and then sweeps into a mine: death for both,
+  // blamed on the sweeper.
   await clickCell(a, 4, 4);
   await sweep(a);
-
-  await expect(a.locator('#hud')).toContainText('0 mines out there');
-  await expect(a.locator('#banner')).toContainText('press New game');
-  await expect(b.locator('#banner')).toContainText('press New game', { timeout: 15_000 });
-  // Every mine went to the player who clicked them.
-  await expect(a.locator('#hud')).toContainText('red 10 – 0 blue');
+  await expect(a.locator('#banner')).toContainText('you set it off', { timeout: 15_000 });
+  await expect(b.locator('#banner')).toContainText('they set it off', { timeout: 15_000 });
 
   await a.close();
   await b.close();

@@ -164,20 +164,6 @@ impl Board {
         Status::Playing
     }
 
-    /// Plants a flag that cannot be taken back — a claimed mine in a flag
-    /// race. `toggle_flag` would let the next click hand the point back.
-    ///
-    /// Returns whether the claim actually landed, so the caller can credit the
-    /// player who got there first and nobody else.
-    pub fn claim(&mut self, x: u8, y: u8) -> bool {
-        let i = self.idx(x, y);
-        if self.cells[i].state != Reveal::Hidden {
-            return false;
-        }
-        self.cells[i].state = Reveal::Flagged;
-        true
-    }
-
     pub fn toggle_flag(&mut self, x: u8, y: u8) {
         let i = self.idx(x, y);
         self.cells[i].state = match self.cells[i].state {

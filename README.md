@@ -38,10 +38,14 @@ switch together the moment someone presses New game.
 
 **Co-op** — one board, cleared together. A mine ends it for both of you.
 
-**Flag race** — one board, but the mines are the prize. Uncovering one *claims*
-it in your colour instead of killing you, and the game ends when the last one
-is taken; most claims wins. There is no way to lose a turn, so it is a race
-rather than a standoff — the MSN Messenger rule.
+**Flag duel** — one board, survived together, scored by flags. A standing flag
+on a mine is +1 for whoever planted it, on a safe cell −1 — so spraying flags
+loses, and the true score only shows at the end (mid-game it would be a mine
+detector; the HUD shows flags placed instead). Revealing a mine still kills,
+for both of you, and the banner names who set it off — somebody has to do the
+dangerous clearing for the game to end, which is exactly the tension. An
+earlier version claimed mines on reveal instead; with no way to die, whoever
+clicked fastest won, so the rule went.
 
 **Race** — the same deal, a board each. Your moves land only on your copy, the
 HUD shows both scores, and the first one home wins; stepping on a mine hands it

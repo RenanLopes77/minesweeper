@@ -103,6 +103,9 @@ pub struct App {
     /// When the move that ended this game was made, so the clock freezes
     /// there rather than at whatever arrived afterwards.
     ended_at: Option<u64>,
+    /// Who made that move. In a lost flag duel this is the player who set
+    /// the mine off — both lose, but the banner names the one who did it.
+    ender: Option<u8>,
     ctx: Ctx,
     canvas: web_sys::HtmlCanvasElement,
 }
@@ -194,16 +197,21 @@ pub fn seat(current: u8, is_host: bool, log: &[Stamped]) -> u8 {
 
 /// What to say once a game is decided, and which colour to say it in.
 ///
-/// Pure, because the eight ways a game can end were otherwise reachable only
-/// from a browser — and the solo ones not even there, since every end-to-end
-/// test connects first.
+/// Pure, because the ways a game can end were otherwise reachable only from
+/// a browser — and the solo ones not even there, since every end-to-end test
+/// connects first.
+///
+/// `scores` is the duel's net flag score (right minus wrong, per player);
+/// `ender` is who made the move that finished the game. Only the flag duel
+/// reads them.
 pub fn verdict(
     mode: Mode,
     status: Status,
     winner: Option<u8>,
     me: u8,
-    scores: [u32; 2],
+    scores: [i32; 2],
     solo: bool,
+    ender: Option<u8>,
 ) -> (String, &'static str) {
     let done = |head: String, class| (format!("{head} — press New game"), class);
     match mode {
@@ -222,21 +230,37 @@ pub fn verdict(
             Some(_) => done("THEY GOT THERE FIRST".into(), "lose"),
             None => (String::new(), ""),
         },
-        Mode::FlagRace if status != Status::Playing => {
-            let (mine, theirs) = (scores[me as usize], scores[1 - me as usize]);
-            match (solo, mine.cmp(&theirs)) {
-                (true, _) => done(format!("all {mine} mines claimed"), "win"),
-                (_, std::cmp::Ordering::Greater) => done(format!("YOU WIN {mine}–{theirs}"), "win"),
-                (_, std::cmp::Ordering::Less) => done(format!("YOU LOSE {mine}–{theirs}"), "lose"),
-                _ => done(format!("A DRAW {mine}–{theirs}"), "win"),
+        Mode::FlagRace => match status {
+            // A mine ends it for both — nobody wins a duel that blew up.
+            // The banner still says whose click it was.
+            Status::Lost => {
+                let head = match (solo, ender == Some(me)) {
+                    (true, _) => "BOOM",
+                    (_, true) => "BOOM — you set it off, nobody wins",
+                    (_, false) => "BOOM — they set it off, nobody wins",
+                };
+                done(head.into(), "lose")
             }
-        }
+            Status::Won => {
+                let (mine, theirs) = (scores[me as usize], scores[1 - me as usize]);
+                match (solo, mine.cmp(&theirs)) {
+                    (true, _) => done(format!("cleared — flag score {mine}"), "win"),
+                    (_, std::cmp::Ordering::Greater) => {
+                        done(format!("YOU WIN {mine}–{theirs}"), "win")
+                    }
+                    (_, std::cmp::Ordering::Less) => {
+                        done(format!("YOU LOSE {mine}–{theirs}"), "lose")
+                    }
+                    _ => done(format!("A DRAW {mine}–{theirs}"), "win"),
+                }
+            }
+            Status::Playing => (String::new(), ""),
+        },
         Mode::Coop => match status {
             Status::Won => done("YOU WIN".into(), "win"),
             Status::Lost => done("BOOM".into(), "lose"),
             Status::Playing => (String::new(), ""),
         },
-        _ => (String::new(), ""),
     }
 }
 
@@ -295,6 +319,7 @@ impl App {
             foe: None,
             winner: None,
             ended_at: None,
+            ender: None,
             ctx,
             canvas,
         }
@@ -325,13 +350,19 @@ impl App {
             self.foe = Some(theirs);
             self.winner = winner;
             self.ended_at = ended.and_then(|i| self.log.get(i)).map(|s| s.at_ms);
+            self.ender = None; // a race names its winner instead
             return;
         }
         self.foe = None;
         self.winner = None;
         if let Some((g, ended)) = Game::replay_marking_end(&events) {
             self.game = g;
-            self.ended_at = ended.and_then(|i| self.log.get(i)).map(|s| s.at_ms);
+            let ending = ended.and_then(|i| self.log.get(i));
+            self.ended_at = ending.map(|s| s.at_ms);
+            self.ender = ending.and_then(|s| match s.ev {
+                Event::Reveal { player, .. } | Event::Flag { player, .. } => Some(player),
+                Event::Start { .. } => None,
+            });
         }
     }
 
@@ -374,8 +405,9 @@ impl App {
             self.game.status(),
             self.winner,
             self.player,
-            self.game.scores(),
+            self.game.flag_scores(),
             self.chan.is_none(),
+            self.ender,
         );
         el.set_text_content(Some(&text));
         el.set_class_name(class);
@@ -408,9 +440,12 @@ impl App {
             let head = match mode_of(&self.log) {
                 Mode::Coop => format!("{} flags left", mines_left(&self.game.board)),
                 Mode::FlagRace => {
-                    let [red, blue] = self.game.scores();
+                    // Flags placed, not flags *right* — the true score is a
+                    // mine detector until the board is cleared, so it waits
+                    // for the banner.
+                    let [red, blue] = self.game.flags_placed();
                     let left = self.game.board.mines as i32 - (red + blue) as i32;
-                    format!("red {red} – {blue} blue · {left} mines out there")
+                    format!("red {red} – {blue} blue · {left} mines unflagged")
                 }
                 Mode::Race => {
                     let (mine, total) = progress(&self.game.board);
@@ -1120,7 +1155,7 @@ mod tests {
         assert!(!is_desync(u32::MAX, 0xAAAA, 3, 0xBBBB));
     }
 
-    /// Eight ways a game can end, none of them reachable from a native test
+    /// Every way a game can end, none of them reachable from a native test
     /// before this was pulled out of the DOM write — and the solo ones not
     /// reachable from the browser tests either, since those always connect.
     #[test]
@@ -1129,33 +1164,41 @@ mod tests {
         let (red, blue) = (0, 1);
 
         // Co-op: the board decides, and an unfinished game says nothing.
-        assert_eq!(verdict(Mode::Coop, Playing, None, red, [0, 0], true).1, "");
-        assert!(
-            verdict(Mode::Coop, Won, None, red, [0, 0], true)
-                .0
-                .starts_with("YOU WIN")
-        );
-        assert!(
-            verdict(Mode::Coop, Lost, None, red, [0, 0], true)
-                .0
-                .starts_with("BOOM")
-        );
+        let coop = |st| verdict(Mode::Coop, st, None, red, [0, 0], true, None).0;
+        assert_eq!(coop(Playing), "");
+        assert!(coop(Won).starts_with("YOU WIN"));
+        assert!(coop(Lost).starts_with("BOOM"));
 
-        // Flag race: the score decides, from the reader's own side.
-        let score = |me, s: [u32; 2]| verdict(Mode::FlagRace, Won, None, me, s, false).0;
+        // Flag duel, survived: the net flag score decides, from the reader's
+        // own side — and it can be negative, wrong flags being -1.
+        let score = |me, s: [i32; 2]| verdict(Mode::FlagRace, Won, None, me, s, false, None).0;
         assert!(score(red, [7, 3]).starts_with("YOU WIN 7–3"));
         assert!(score(blue, [7, 3]).starts_with("YOU LOSE 3–7"));
         assert!(score(red, [5, 5]).starts_with("A DRAW 5–5"));
-        // Alone, there is nobody to beat — and a joiner left alone is still
-        // player 1, so it must read its own column.
+        assert!(score(red, [-2, 1]).starts_with("YOU LOSE -2–1"));
+        // Alone there is nobody to beat, but the score is still yours.
         assert!(
-            verdict(Mode::FlagRace, Won, None, blue, [3, 7], true)
+            verdict(Mode::FlagRace, Won, None, blue, [3, 7], true, None)
                 .0
-                .starts_with("all 7 mines claimed")
+                .starts_with("cleared — flag score 7")
+        );
+
+        // Flag duel, blown up: both lose, and the clicker is named.
+        let boom = |me, ender| verdict(Mode::FlagRace, Lost, None, me, [9, 0], false, ender);
+        assert!(boom(red, Some(red)).0.starts_with("BOOM — you set it off"));
+        assert!(boom(red, Some(blue)).0.starts_with("BOOM — they set it off"));
+        // Nobody wins, however far ahead the scoreboard was.
+        assert_eq!(boom(red, Some(blue)).1, "lose");
+        assert_eq!(boom(blue, Some(red)).1, "lose");
+        assert!(
+            verdict(Mode::FlagRace, Lost, None, red, [0, 0], true, Some(red))
+                .0
+                .starts_with("BOOM — press"),
+            "solo has nobody to blame"
         );
 
         // Race: the verdict decides, and losing has two flavours.
-        let race = |w, st, solo| verdict(Mode::Race, st, w, red, [0, 0], solo).0;
+        let race = |w, st, solo| verdict(Mode::Race, st, w, red, [0, 0], solo, None).0;
         assert!(race(Some(red), Playing, false).starts_with("YOU WIN"));
         assert!(race(Some(blue), Playing, false).starts_with("THEY GOT THERE FIRST"));
         assert!(race(Some(blue), Lost, false).starts_with("BOOM — the race is theirs"));
@@ -1164,7 +1207,7 @@ mod tests {
 
         // Every ending tells you how to start another.
         for m in [Mode::Coop, Mode::FlagRace, Mode::Race] {
-            let (text, class) = verdict(m, Won, Some(red), red, [1, 0], false);
+            let (text, class) = verdict(m, Won, Some(red), red, [1, 0], false, None);
             assert!(text.ends_with("press New game"), "{m:?}: {text}");
             assert!(!class.is_empty());
         }

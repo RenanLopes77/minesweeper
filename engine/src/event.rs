@@ -7,8 +7,9 @@ pub enum Mode {
     /// One board, cleared together. Hitting a mine ends it for both.
     #[default]
     Coop = 0,
-    /// One board, but the mines are the prize: revealing one claims it for you
-    /// instead of killing you, and whoever claims more wins.
+    /// One board, survived together, but the flags are the score: a standing
+    /// flag on a mine is +1, on a safe cell -1, and whoever nets more when
+    /// the board is cleared wins. A revealed mine still ends it for both.
     FlagRace = 1,
     /// Same seed, a board each, first to clear theirs wins.
     Race = 2,
@@ -31,7 +32,7 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Coop => "Co-op — clear it together",
-            Mode::FlagRace => "Flag race — claim the mines",
+            Mode::FlagRace => "Flag duel — survive together, best flags win",
             Mode::Race => "Race — same deal, a board each",
         }
     }
