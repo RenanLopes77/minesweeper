@@ -249,7 +249,10 @@ mod tests {
             );
         }
         // ...but cutting exactly on the boundary is a valid one-event log.
-        assert_eq!(decode_log::<Event>(&full[..start]).map(|v| v.len()), Some(1));
+        assert_eq!(
+            decode_log::<Event>(&full[..start]).map(|v| v.len()),
+            Some(1)
+        );
         assert_eq!(decode_log::<Event>(&full).map(|v| v.len()), Some(2));
     }
 
@@ -359,11 +362,17 @@ mod tests {
     fn state_message_rejects_wrong_length() {
         let full = encode_msg(&Msg::State { count: 1, hash: 2 });
         for cut in 1..full.len() {
-            assert!(decode_msg::<Event>(&full[..cut]).is_none(), "accepted {cut} bytes");
+            assert!(
+                decode_msg::<Event>(&full[..cut]).is_none(),
+                "accepted {cut} bytes"
+            );
         }
         let mut long = full.clone();
         long.push(0);
-        assert!(decode_msg::<Event>(&long).is_none(), "accepted a trailing byte");
+        assert!(
+            decode_msg::<Event>(&long).is_none(),
+            "accepted a trailing byte"
+        );
     }
 
     #[test]
@@ -473,7 +482,11 @@ mod tests {
         for ev in bad {
             assert!(!ev.is_playable(), "{ev:?} passed is_playable");
             let msg = encode_msg(&Msg::Events(vec![stamp(0, ev)]));
-            assert_eq!(decode_msg::<Event>(&msg), None, "{ev:?} survived decode_msg");
+            assert_eq!(
+                decode_msg::<Event>(&msg),
+                None,
+                "{ev:?} survived decode_msg"
+            );
         }
     }
 
@@ -500,7 +513,10 @@ mod tests {
             },
         );
         assert!(decode_msg::<Event>(&encode_msg(&Msg::Events(vec![good]))).is_some());
-        assert_eq!(decode_msg::<Event>(&encode_msg(&Msg::Events(vec![good, bad]))), None);
+        assert_eq!(
+            decode_msg::<Event>(&encode_msg(&Msg::Events(vec![good, bad]))),
+            None
+        );
     }
 
     fn any_stamped() -> impl Strategy<Value = Stamped> {

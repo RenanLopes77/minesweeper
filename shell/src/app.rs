@@ -1186,7 +1186,11 @@ mod tests {
         // Flag duel, blown up: both lose, and the clicker is named.
         let boom = |me, ender| verdict(Mode::FlagRace, Lost, None, me, [9, 0], false, ender);
         assert!(boom(red, Some(red)).0.starts_with("BOOM — you set it off"));
-        assert!(boom(red, Some(blue)).0.starts_with("BOOM — they set it off"));
+        assert!(
+            boom(red, Some(blue))
+                .0
+                .starts_with("BOOM — they set it off")
+        );
         // Nobody wins, however far ahead the scoreboard was.
         assert_eq!(boom(red, Some(blue)).1, "lose");
         assert_eq!(boom(blue, Some(red)).1, "lose");
@@ -1212,5 +1216,4 @@ mod tests {
             assert!(!class.is_empty());
         }
     }
-
 }

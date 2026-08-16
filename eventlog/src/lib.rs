@@ -224,7 +224,10 @@ pub enum Msg<P> {
     /// The sender's state hash after applying `count` events. Compared only
     /// when the receiver is also at `count` — different counts just mean one
     /// side is behind, which is normal and not a desync.
-    State { count: u32, hash: u64 },
+    State {
+        count: u32,
+        hash: u64,
+    },
 }
 
 const MSG_EVENTS: u8 = 0x00;
@@ -361,14 +364,24 @@ mod tests {
     #[test]
     fn sanitised_rebuilds_only_a_log_we_could_have_built() {
         let opens = |p: &Tick| p.0 == 1;
-        let tidy = sanitised(vec![at(2, 5, 20), at(0, 1, 0), at(1, 3, 10), at(2, 5, 99)], 10, opens)
-            .expect("a real log was refused");
+        let tidy = sanitised(
+            vec![at(2, 5, 20), at(0, 1, 0), at(1, 3, 10), at(2, 5, 99)],
+            10,
+            opens,
+        )
+        .expect("a real log was refused");
         assert_eq!(tidy.len(), 3, "the duplicate survived");
         assert!(tidy.windows(2).all(|w| w[0] < w[1]));
 
         assert!(sanitised::<Tick>(vec![], 10, opens).is_none());
-        assert!(sanitised(vec![at(1, 3, 0)], 10, opens).is_none(), "no opening");
-        assert!(sanitised(vec![at(0, 1, 0); 11], 10, opens).is_none(), "past the cap");
+        assert!(
+            sanitised(vec![at(1, 3, 0)], 10, opens).is_none(),
+            "no opening"
+        );
+        assert!(
+            sanitised(vec![at(0, 1, 0); 11], 10, opens).is_none(),
+            "past the cap"
+        );
     }
 
     #[test]
@@ -387,12 +400,18 @@ mod tests {
         // Cutting inside the second record: the first still decodes, the log
         // as a whole must not.
         for cut in STAMP_LEN + 2..bytes.len() {
-            assert!(decode_log::<Tick>(&bytes[..cut]).is_none(), "accepted {cut} bytes");
+            assert!(
+                decode_log::<Tick>(&bytes[..cut]).is_none(),
+                "accepted {cut} bytes"
+            );
         }
 
         let m = Msg::Events(log);
         assert_eq!(decode_msg::<Tick>(&encode_msg(&m)), Some(m));
-        let s = Msg::State { count: 7, hash: 0x0102_0304_0506_0708 };
+        let s = Msg::State {
+            count: 7,
+            hash: 0x0102_0304_0506_0708,
+        };
         let sb = encode_msg::<Tick>(&s);
         assert_eq!(sb.len(), STATE_LEN);
         assert_eq!(decode_msg::<Tick>(&sb), Some(s));

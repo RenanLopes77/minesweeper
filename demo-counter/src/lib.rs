@@ -36,7 +36,12 @@ impl Payload for Ev {
     fn decode(bytes: &[u8]) -> Option<(Self, usize)> {
         match *bytes.first()? {
             TAG_OPEN => Some((Ev::Open, 1)),
-            TAG_TAP => Some((Ev::Tap { player: *bytes.get(1)? }, 2)),
+            TAG_TAP => Some((
+                Ev::Tap {
+                    player: *bytes.get(1)?,
+                },
+                2,
+            )),
             _ => None,
         }
     }
