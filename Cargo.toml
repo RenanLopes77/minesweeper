@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["engine", "eventlog", "p2p-link", "shell"]
+members = ["demo-counter", "engine", "eventlog", "p2p-link", "shell"]
 
 [profile.release]
 opt-level = "z"

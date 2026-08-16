@@ -1,0 +1,25 @@
+[package]
+name = "demo-counter"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+eventlog = { path = "../eventlog" }
+p2p-link = { path = "../p2p-link" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlTextAreaElement",
+  "RtcDataChannel",
+  "RtcDataChannelState",
+]

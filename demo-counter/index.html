@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared tally</title>
+  <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="0">
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-content: center;
+      gap: 0.8rem;
+      background: #1b1f27;
+      color: #cdd3dd;
+      font: 15px ui-monospace, monospace;
+      text-align: center;
+    }
+    #tally { font-size: 1.6rem; }
+    #status { color: #7a8494; max-width: 34rem; }
+    button {
+      font: inherit;
+      padding: 0.5rem 1rem;
+      background: #2b3038;
+      color: inherit;
+      border: 1px solid #3a404b;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #tap { font-size: 1.4rem; padding: 0.8rem 2rem; }
+    textarea {
+      width: min(90vw, 34rem);
+      height: 3.2rem;
+      background: #12151b;
+      color: inherit;
+      border: 1px solid #3a404b;
+      border-radius: 6px;
+      font: 12px ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="tally"></div>
+  <button id="tap">tap</button>
+  <div id="status"></div>
+  <div><button id="go">Host</button> <button id="connect">Connect</button></div>
+  <textarea id="sig" placeholder="your link appears here" readonly></textarea>
+  <textarea id="reply" placeholder="paste the other side's link here"></textarea>
+</body>
+</html>

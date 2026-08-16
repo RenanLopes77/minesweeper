@@ -22,12 +22,23 @@ export default defineConfig({
     // The handshake needs a real ICE stack; headless Chromium has one.
     launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] },
   },
-  // Nothing to serve when the site under test is already deployed.
-  webServer: LIVE ? undefined : {
-    command:
-      'cd ../shell && trunk build && python3 -m http.server 8081 --bind 127.0.0.1 --directory dist',
-    url: 'http://127.0.0.1:8081',
-    reuseExistingServer: true,
-    timeout: 180_000,
-  },
+  // Nothing to serve when the site under test is already deployed. The
+  // second server is demo-counter, tally.spec.js's subject — the page that
+  // proves eventlog + p2p-link work outside the game.
+  webServer: LIVE ? undefined : [
+    {
+      command:
+        'cd ../shell && trunk build && python3 -m http.server 8081 --bind 127.0.0.1 --directory dist',
+      url: 'http://127.0.0.1:8081',
+      reuseExistingServer: true,
+      timeout: 180_000,
+    },
+    {
+      command:
+        'cd ../demo-counter && trunk build && python3 -m http.server 8082 --bind 127.0.0.1 --directory dist',
+      url: 'http://127.0.0.1:8082',
+      reuseExistingServer: true,
+      timeout: 180_000,
+    },
+  ],
 });
