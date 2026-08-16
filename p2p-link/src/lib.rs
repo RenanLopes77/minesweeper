@@ -11,4 +11,7 @@
 pub mod b64;
 pub mod net;
 pub mod sdp;
+pub mod session;
 pub mod zip;
+
+pub use session::{Hooks, LinkKind, Role, Session};

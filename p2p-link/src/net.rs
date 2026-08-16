@@ -25,9 +25,8 @@ use web_sys::{
 /// It sees an IP and nothing else — no game data passes through it.
 const STUN: &str = "stun:stun.l.google.com:19302";
 
-/// Unused until the real two-device flow lands in ch12 — the loopback
-/// self-test below deliberately builds STUN-free connections instead.
-#[allow(dead_code)]
+/// A connection configured for the open internet. The loopback self-test
+/// below deliberately builds STUN-free connections instead.
 pub fn new_connection() -> Result<RtcPeerConnection, JsValue> {
     let ice = js_sys::Array::new();
     let server = RtcIceServer::new();
