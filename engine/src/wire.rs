@@ -13,18 +13,37 @@
 //! Flag    0x02  player(1)  x(1)  y(1)           =  4 bytes
 //! ```
 //!
-//! A log is a sequence of *stamped* events — each of the above prefixed with
-//! `seq(4) at_ms(8)`: the Lamport clock that puts the two peers' moves in one
-//! agreed order, and the author's wall clock so the game clock can be read
-//! out of the log. That prefix is version 3 of this format; an older peer
-//! reading it sees a seq where it expects a tag and rejects the message,
-//! which is the right failure.
+//! The stamped-log framing around these — the `seq(4) at_ms(8)` prefix, the
+//! message envelope, the all-or-nothing decode — lives in the `eventlog`
+//! crate; this module only says what a Minesweeper move looks like in bytes,
+//! and re-exports the framing specialised to it. The stamp prefix is version
+//! 3 of this format; an older peer reading it sees a seq where it expects a
+//! tag and rejects the message, which is the right failure.
 //!
 //! Every decode path is a trust boundary — the bytes arrive from a peer, and
 //! a peer can be buggy, outdated, or hostile. Nothing here panics or indexes
 //! unchecked; malformed input returns `None` and the caller drops the message.
 
-use crate::{Event, Mode, Stamped};
+use crate::{Event, Mode};
+
+/// The message envelope, carrying Minesweeper moves.
+pub type Msg = eventlog::Msg<Event>;
+pub use eventlog::{decode_log, decode_msg, encode_log, encode_msg};
+
+/// How events plug into the `eventlog` framing. `valid` is `is_playable`:
+/// an event that decodes cleanly but describes an impossible game is refused
+/// at the trust boundary rather than folded over later.
+impl eventlog::Payload for Event {
+    fn encode(&self, out: &mut Vec<u8>) {
+        Event::encode(self, out);
+    }
+    fn decode(bytes: &[u8]) -> Option<(Event, usize)> {
+        Event::decode(bytes)
+    }
+    fn valid(&self) -> bool {
+        self.is_playable()
+    }
+}
 
 const TAG_START: u8 = 0;
 const TAG_REVEAL: u8 = 1;
@@ -32,10 +51,6 @@ const TAG_FLAG: u8 = 2;
 
 const START_LEN: usize = 14;
 const MOVE_LEN: usize = 4;
-/// The `seq` + `at_ms` prefix on every record in a log.
-const SEQ_LEN: usize = 4;
-const AT_LEN: usize = 8;
-const STAMP_LEN: usize = SEQ_LEN + AT_LEN;
 
 impl Event {
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -90,100 +105,11 @@ impl Event {
     }
 }
 
-impl Stamped {
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.seq.to_le_bytes());
-        out.extend_from_slice(&self.at_ms.to_le_bytes());
-        self.ev.encode(out);
-    }
-
-    pub fn decode(bytes: &[u8]) -> Option<(Stamped, usize)> {
-        let seq = u32::from_le_bytes(bytes.get(..SEQ_LEN)?.try_into().ok()?);
-        let at_ms = u64::from_le_bytes(bytes.get(SEQ_LEN..STAMP_LEN)?.try_into().ok()?);
-        let (ev, n) = Event::decode(&bytes[STAMP_LEN..])?;
-        Some((Stamped { seq, ev, at_ms }, STAMP_LEN + n))
-    }
-}
-
-/// What one DataChannel message can be.
-///
-/// The event stream alone cannot carry a checksum, so messages get a one-byte
-/// envelope. Two kinds is all this needs: moves, and "here is what my board
-/// looks like now".
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Msg {
-    Events(Vec<Stamped>),
-    /// The sender's board hash after applying `count` events. Compared only
-    /// when the receiver is also at `count` — different counts just mean one
-    /// side is behind, which is normal and not a desync.
-    State {
-        count: u32,
-        hash: u64,
-    },
-}
-
-const MSG_EVENTS: u8 = 0x00;
-const MSG_STATE: u8 = 0x01;
-const STATE_LEN: usize = 13;
-
-pub fn encode_msg(msg: &Msg) -> Vec<u8> {
-    match msg {
-        Msg::Events(events) => {
-            let mut out = vec![MSG_EVENTS];
-            out.extend_from_slice(&encode_log(events));
-            out
-        }
-        Msg::State { count, hash } => {
-            let mut out = vec![MSG_STATE];
-            out.extend_from_slice(&count.to_le_bytes());
-            out.extend_from_slice(&hash.to_le_bytes());
-            out
-        }
-    }
-}
-
-/// Same trust rules as `decode_log`: a peer wrote these bytes, so anything
-/// unexpected returns None instead of being partially believed.
-pub fn decode_msg(bytes: &[u8]) -> Option<Msg> {
-    match *bytes.first()? {
-        // A message is all-or-nothing: one unplayable event and the whole
-        // thing is dropped, because half a log is how peers diverge quietly.
-        MSG_EVENTS => decode_log(&bytes[1..])
-            .filter(|log| log.iter().all(|s| s.ev.is_playable()))
-            .map(Msg::Events),
-        MSG_STATE if bytes.len() == STATE_LEN => Some(Msg::State {
-            count: u32::from_le_bytes(bytes[1..5].try_into().ok()?),
-            hash: u64::from_le_bytes(bytes[5..13].try_into().ok()?),
-        }),
-        _ => None,
-    }
-}
-
-pub fn encode_log(events: &[Stamped]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(events.len() * (STAMP_LEN + MOVE_LEN));
-    for ev in events {
-        ev.encode(&mut out);
-    }
-    out
-}
-
-/// Decodes a whole log. Leftover or truncated bytes are a failure, not a
-/// partial success — accepting half a log would desync the peers silently,
-/// which is exactly the failure mode this format exists to prevent.
-pub fn decode_log(bytes: &[u8]) -> Option<Vec<Stamped>> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let (ev, n) = Stamped::decode(&bytes[i..])?;
-        out.push(ev);
-        i += n;
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Stamped;
+    use eventlog::{STAMP_LEN, STATE_LEN};
     use proptest::prelude::*;
 
     fn stamp(seq: u32, ev: Event) -> Stamped {
@@ -318,13 +244,13 @@ mod tests {
         // as a whole must not.
         for cut in start + 1..full.len() {
             assert!(
-                decode_log(&full[..cut]).is_none(),
+                decode_log::<Event>(&full[..cut]).is_none(),
                 "accepted a log truncated to {cut} bytes"
             );
         }
         // ...but cutting exactly on the boundary is a valid one-event log.
-        assert_eq!(decode_log(&full[..start]).map(|v| v.len()), Some(1));
-        assert_eq!(decode_log(&full).map(|v| v.len()), Some(2));
+        assert_eq!(decode_log::<Event>(&full[..start]).map(|v| v.len()), Some(1));
+        assert_eq!(decode_log::<Event>(&full).map(|v| v.len()), Some(2));
     }
 
     /// The stamp is what the peers sort by and what the clock is read from,
@@ -415,7 +341,7 @@ mod tests {
             },
         )]);
         v.push(TAG_START); // a valid tag, but nothing behind it
-        assert!(decode_log(&v).is_none());
+        assert!(decode_log::<Event>(&v).is_none());
     }
 
     #[test]
@@ -433,22 +359,22 @@ mod tests {
     fn state_message_rejects_wrong_length() {
         let full = encode_msg(&Msg::State { count: 1, hash: 2 });
         for cut in 1..full.len() {
-            assert!(decode_msg(&full[..cut]).is_none(), "accepted {cut} bytes");
+            assert!(decode_msg::<Event>(&full[..cut]).is_none(), "accepted {cut} bytes");
         }
         let mut long = full.clone();
         long.push(0);
-        assert!(decode_msg(&long).is_none(), "accepted a trailing byte");
+        assert!(decode_msg::<Event>(&long).is_none(), "accepted a trailing byte");
     }
 
     #[test]
     fn unknown_message_kind_is_rejected() {
-        assert!(decode_msg(&[0x7F, 0, 0, 0]).is_none());
-        assert!(decode_msg(&[]).is_none());
+        assert!(decode_msg::<Event>(&[0x7F, 0, 0, 0]).is_none());
+        assert!(decode_msg::<Event>(&[]).is_none());
     }
 
     #[test]
     fn empty_log_round_trips() {
-        assert_eq!(decode_log(&encode_log(&[])), Some(vec![]));
+        assert_eq!(decode_log::<Event>(&encode_log::<Event>(&[])), Some(vec![]));
     }
 
     /// Events a peer is allowed to play. `any_event` deliberately includes
@@ -547,7 +473,7 @@ mod tests {
         for ev in bad {
             assert!(!ev.is_playable(), "{ev:?} passed is_playable");
             let msg = encode_msg(&Msg::Events(vec![stamp(0, ev)]));
-            assert_eq!(decode_msg(&msg), None, "{ev:?} survived decode_msg");
+            assert_eq!(decode_msg::<Event>(&msg), None, "{ev:?} survived decode_msg");
         }
     }
 
@@ -573,8 +499,8 @@ mod tests {
                 y: 0,
             },
         );
-        assert!(decode_msg(&encode_msg(&Msg::Events(vec![good]))).is_some());
-        assert_eq!(decode_msg(&encode_msg(&Msg::Events(vec![good, bad]))), None);
+        assert!(decode_msg::<Event>(&encode_msg(&Msg::Events(vec![good]))).is_some());
+        assert_eq!(decode_msg::<Event>(&encode_msg(&Msg::Events(vec![good, bad]))), None);
     }
 
     fn any_stamped() -> impl Strategy<Value = Stamped> {
@@ -645,8 +571,8 @@ mod tests {
         /// fail. Anything reachable from a DataChannel needs one of these.
         #[test]
         fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
-            let _ = decode_log(&bytes);
-            let _ = decode_msg(&bytes);
+            let _ = decode_log::<Event>(&bytes);
+            let _ = decode_msg::<Event>(&bytes);
         }
 
         #[test]

@@ -66,41 +66,10 @@ const DIGITS: [&str; 9] = [
     "", "#2b52c8", "#2e7d32", "#c0392b", "#1f3070", "#8c3b2e", "#17727a", "#2b3038", "#6d7684",
 ];
 
-/// Folds a peer's events into ours and returns whether anything was new.
-///
-/// The log is kept sorted by `Stamped`'s own order, which both peers agree on,
-/// so it does not matter who heard what first. Re-delivery of an event we
-/// already have is a no-op rather than a second move.
-pub fn merge(log: &mut Vec<Stamped>, incoming: &[Stamped]) -> bool {
-    let mut changed = false;
-    for &s in incoming {
-        // A move is identified by its place in the order and what it does —
-        // *not* by when it was made. `at_ms` is in `Stamped`'s derived `Ord`,
-        // so an echo of one of our own moves with a fresh timestamp would sort
-        // as a separate entry and toggle the same flag a second time.
-        match log.binary_search_by(|p| (p.seq, p.ev).cmp(&(s.seq, s.ev))) {
-            Ok(_) => {}
-            Err(i) => {
-                log.insert(i, s);
-                changed = true;
-            }
-        }
-    }
-    changed
-}
-
 /// The most events we will fold. A peer can send a log as large as it likes,
 /// and every message re-folds the whole thing — a few thousand moves is far
 /// past any real game and still refolds in microseconds.
 pub const MAX_LOG: usize = 20_000;
-
-/// Whether merging `incoming` could push the log past `MAX_LOG`. `sanitised`
-/// already caps a log we adopt wholesale; this is the same cap for the merge
-/// path, where a peer inventing moves forever would otherwise grow the log —
-/// and the refold each message triggers — without bound.
-pub fn overflows(ours: usize, incoming: usize) -> bool {
-    ours.saturating_add(incoming) > MAX_LOG
-}
 
 /// Is this event the opening of a game that is not ours? A handover always
 /// starts one: the first event of a log, a `Start` at seq 0. A restart is a
@@ -109,28 +78,17 @@ pub fn is_foreign_start(s: &Stamped, ours: Option<&Stamped>) -> bool {
     s.seq == 0 && matches!(s.ev, Event::Start { .. }) && Some(s) != ours
 }
 
-/// A log we are about to adopt wholesale has to be one we could have built
-/// ourselves: bounded, sorted, free of duplicates, and opening with a deal.
-/// `merge` binary-searches this afterwards, so an unsorted log would quietly
-/// disable de-duplication for the rest of the session.
-pub fn sanitised(mut events: Vec<Stamped>) -> Option<Vec<Stamped>> {
-    if events.len() > MAX_LOG {
-        return None;
-    }
-    events.sort();
-    events.dedup_by(|a, b| (a.seq, a.ev) == (b.seq, b.ev));
-    match events.first() {
-        Some(s) if s.seq == 0 && matches!(s.ev, Event::Start { .. }) => Some(events),
-        _ => None,
-    }
+/// A `Start` is what a log may open with — what `eventlog::sanitised` demands
+/// at seq 0 before a peer's log is adopted wholesale.
+fn opens(ev: &Event) -> bool {
+    matches!(ev, Event::Start { .. })
 }
 
 pub struct App {
     pub game: Game,
-    pub log: Vec<Stamped>,
-    /// Lamport clock: one past the highest `seq` we have seen from anyone, so
-    /// a move we make now sorts after everything we knew about when we made it.
-    clock: u32,
+    /// The log and its Lamport clock, so a move we make now always sorts
+    /// after everything we knew about when we made it.
+    pub log: eventlog::Log<Event>,
     /// 0 for the host, 1 for the joiner. Unused by the rules; it rides along
     /// in every event so a later chapter can attribute moves.
     pub player: u8,
@@ -321,18 +279,16 @@ impl App {
         let (w, h, mines, _) = LEVELS[0];
         App {
             game: Game::new(seed, w, h, mines, Mode::Coop),
-            log: vec![Stamped {
-                seq: 0,
-                ev: Event::Start {
+            log: eventlog::Log::open(
+                Event::Start {
                     seed,
                     w,
                     h,
                     mines,
                     mode: Mode::Coop,
                 },
-                at_ms: js_sys::Date::now() as u64,
-            }],
-            clock: 0,
+                js_sys::Date::now() as u64,
+            ),
             player: 0,
             flag_mode: false,
             chan: None,
@@ -479,21 +435,9 @@ impl App {
 /// A move made on this device.
 pub fn local(app: &Shared, ev: Event) {
     let mut a = app.borrow_mut();
-    // Saturating: a peer can hand us seq = u32::MAX, and wrapping would put
-    // our next move at the very start of the log.
-    a.clock = a.clock.saturating_add(1);
-    let s = Stamped {
-        seq: a.clock,
-        ev,
-        at_ms: js_sys::Date::now() as u64,
-    };
-    // Our clock is at least as high as anything we have heard, so this sorts
-    // last and the append is already in order.
-    // Through `merge`, not `push`: it is the only writer that keeps the log
-    // sorted and free of duplicates. A peer can pin our clock at u32::MAX, and
-    // an appended move at a seq we already hold would sit out of order — which
-    // is exactly what `merge`'s binary search then relies on being true.
-    merge(&mut a.log, &[s]);
+    // The log stamps and orders the move; the clock hazards — saturation, a
+    // peer pinning us at u32::MAX — live in `eventlog::Log`.
+    let s = a.log.append(ev, js_sys::Date::now() as u64);
     // Refold rather than patching the board with this one event: the fold is
     // the only thing that knows about a race's two boards and its verdict.
     a.rebuild();
@@ -533,7 +477,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                 .first()
                 .is_some_and(|s| is_foreign_start(s, ours.as_ref()));
             if handover {
-                let Some(log) = sanitised(events) else {
+                let Some(log) = eventlog::sanitised(events, MAX_LOG, opens) else {
                     return net::note("ignored a log that could not be a game");
                 };
                 if theirs_survives(&a.log, &log) {
@@ -542,7 +486,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                     // are not using. The seat our discarded log gave us no
                     // longer means anything.
                     a.player = seat_in(&log, a.player == 0);
-                    a.log = log;
+                    a.log.adopt(log);
                 } else {
                     net::log("kept our game — theirs had less in it");
                 }
@@ -555,10 +499,10 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                 // Same game: this is either a move or a whole log arriving
                 // after a reconnect. Merging handles both, and handles them
                 // being partly or entirely things we already know.
-                if overflows(a.log.len(), events.len()) {
+                if eventlog::overflows(a.log.len(), events.len(), MAX_LOG) {
                     return net::note("ignored a message past the log cap");
                 }
-                let new = merge(&mut a.log, &events);
+                let new = a.log.merge(&events);
                 if events.len() > 1 {
                     net::log(&format!(
                         "merged {} events, {}",
@@ -567,9 +511,6 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
                     ));
                 }
             }
-            // Our clock must outrun anything we have now seen, or our next
-            // move would sort before a move that has already happened.
-            a.clock = a.clock.max(a.log.last().map_or(0, |s| s.seq));
             a.rebuild();
             a.refresh();
             // Answer with where that left us, so they can check too.
@@ -600,7 +541,7 @@ pub fn remote(app: &Shared, bytes: &[u8]) {
 pub fn on_connect(app: &Shared, is_host: bool) {
     let mut a = app.borrow_mut();
     a.player = seat(a.player, is_host, &a.log);
-    let log = a.log.clone();
+    let log = a.log.to_vec();
     net::log(&format!("sent log, {} events", log.len()));
     a.send(&Msg::Events(log));
     a.send_state();
@@ -715,6 +656,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eventlog::merge;
 
     #[test]
     fn flags_left_counts_down_and_can_go_negative() {
@@ -964,25 +906,6 @@ mod tests {
         assert_eq!(ours, theirs);
     }
 
-    /// A peer can echo one of our own moves back with a fresh timestamp. If
-    /// the timestamp were part of a move's identity, that echo would land as a
-    /// second move and toggle the same flag off again — with both peers
-    /// agreeing on the corrupted board, so no DESYNC would ever fire.
-    #[test]
-    fn a_move_re_stamped_with_a_new_time_is_not_a_second_move() {
-        let flag = Event::Flag {
-            player: 0,
-            x: 3,
-            y: 3,
-        };
-        let mut log = vec![start(1), at(1, flag, 1_000)];
-        let echo = at(1, flag, 9_999);
-
-        assert!(!merge(&mut log, &[echo]), "the echo was treated as news");
-        assert_eq!(log.len(), 2, "the same move was logged twice");
-        assert_eq!(log[1].at_ms, 1_000, "the original timestamp was replaced");
-    }
-
     /// Two different moves that share a seq are still two moves.
     #[test]
     fn the_same_seq_from_two_players_keeps_both_moves() {
@@ -1019,21 +942,11 @@ mod tests {
         assert_eq!(progress(&b), (0, 0));
     }
 
-    /// A log arriving from a peer is folded and then binary-searched. Taking
-    /// one verbatim — unsorted, duplicated, or not opening with a deal — turns
-    /// de-duplication off for the rest of the session.
+    /// The opening predicate handed to `eventlog::sanitised`: only a deal
+    /// opens a game, so a log that leads with a move is refused wholesale.
     #[test]
-    fn an_adopted_log_must_be_one_we_could_have_built() {
-        let a = at(
-            2,
-            Event::Flag {
-                player: 0,
-                x: 1,
-                y: 1,
-            },
-            20,
-        );
-        let b = at(
+    fn only_a_deal_can_open_an_adopted_log() {
+        let mv = at(
             1,
             Event::Reveal {
                 player: 1,
@@ -1042,20 +955,10 @@ mod tests {
             },
             10,
         );
-
-        let tidy = sanitised(vec![a, start(1), b, a]).expect("a real log was refused");
-        assert_eq!(tidy.len(), 3, "the duplicate survived");
-        assert!(tidy.windows(2).all(|w| w[0] < w[1]), "still unsorted");
-        assert!(matches!(tidy[0].ev, Event::Start { .. }));
-
-        assert!(sanitised(vec![]).is_none(), "an empty log is not a game");
+        assert!(eventlog::sanitised(vec![start(1), mv], MAX_LOG, opens).is_some());
         assert!(
-            sanitised(vec![a, b]).is_none(),
+            eventlog::sanitised(vec![mv], MAX_LOG, opens).is_none(),
             "a log with no deal was accepted"
-        );
-        assert!(
-            sanitised(vec![start(1); MAX_LOG + 1]).is_none(),
-            "an unbounded log was accepted"
         );
     }
 
@@ -1078,34 +981,6 @@ mod tests {
                 "{w}x{h} with {mines} mines is unplayable"
             );
         }
-    }
-
-    /// A move made while a peer has pinned our clock at its ceiling must not
-    /// land out of order: `merge`'s binary search is what everything else
-    /// leans on, and it needs the log sorted.
-    #[test]
-    fn a_saturated_clock_cannot_unsort_the_log() {
-        let flag = Event::Flag {
-            player: 0,
-            x: 3,
-            y: 3,
-        };
-        let reveal = Event::Reveal {
-            player: 0,
-            x: 4,
-            y: 4,
-        };
-        let mut log = vec![start(1), at(u32::MAX, flag, 10)];
-
-        // A local move at the same saturated seq, sorting before the flag.
-        merge(&mut log, &[at(u32::MAX, reveal, 20)]);
-        assert!(
-            log.windows(2).all(|w| w[0] < w[1]),
-            "the log came back unsorted"
-        );
-        // And the same move again is still not news.
-        assert!(!merge(&mut log, &[at(u32::MAX, reveal, 99)]));
-        assert_eq!(log.len(), 3);
     }
 
     /// Seats must survive a reconnect. After a drop either peer may host, and
@@ -1295,31 +1170,4 @@ mod tests {
         }
     }
 
-    /// The cap `remote` checks before merging: full is full, and the sum must
-    /// not wrap into "plenty of room" when a peer's count is absurd.
-    #[test]
-    fn the_log_cap_refuses_what_would_overflow_it() {
-        assert!(!overflows(0, MAX_LOG));
-        assert!(overflows(0, MAX_LOG + 1));
-        assert!(overflows(MAX_LOG, 1));
-        assert!(overflows(usize::MAX, usize::MAX));
-    }
-
-    #[test]
-    fn merge_ignores_events_it_already_has() {
-        let mut log = vec![
-            start(1),
-            stamp(
-                1,
-                Event::Flag {
-                    player: 0,
-                    x: 3,
-                    y: 3,
-                },
-            ),
-        ];
-        let again = log.clone();
-        assert!(!merge(&mut log, &again), "nothing was new");
-        assert_eq!(log.len(), 2, "a redelivered flag must not toggle twice");
-    }
 }
