@@ -13,7 +13,9 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 qrcode = { version = "0.14", default-features = false }
-p2p-link = { version = "0.1.0", path = "../p2p-link" }
+# Lives in its own repo now. Cargo.lock pins the exact commit;
+# `cargo update -p p2p-link` moves to the latest main.
+p2p-link = { git = "https://github.com/RenanLopes77/p2p-link" }
 
 [dependencies.web-sys]
 version = "0.3"

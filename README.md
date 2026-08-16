@@ -16,15 +16,17 @@ connects on the spot. Two links, no accounts, no server.
     eventlog/     pure Rust, zero dependencies. The generic replicated log:
                   Lamport-stamped events, order-independent merge, and the
                   byte framing — the application plugs in via a Payload trait.
-    p2p-link/     wasm. The serverless WebRTC handshake as a headless
-                  Session: link-based signalling, SDP compaction, the state
-                  machine. UI arrives through hooks; it never touches the page.
     engine/       pure Rust. Minesweeper's rules, boards, and what a move
                   looks like in bytes.
     shell/        wasm-bindgen + canvas. Draws the engine, wires the page to
                   a Session, and folds the event log into a board.
     demo-counter/ the second consumer: a shared tally built from eventlog +
                   p2p-link alone, proof the two crates are plug-and-play.
+
+The WebRTC layer graduated to its own repo:
+[p2p-link](https://github.com/RenanLopes77/p2p-link) — the serverless
+handshake as a headless Session (link signalling, SDP compaction, the state
+machine), pulled in as a git dependency and pinned by `Cargo.lock`.
 
 The engine never imports anything web-shaped. That is what lets the renderer be
 swapped for wgpu later without touching game logic, and what lets the tests run
